@@ -45,6 +45,11 @@ const Kitchen = sequelize.define('JrshKitchen', {
     type: DataTypes.STRING(128),
     primaryKey: true
   },
+  legacyId: {
+    type: DataTypes.STRING(128),
+    allowNull: true,
+    unique: true
+  },
   ownerUserId: {
     type: DataTypes.STRING(128),
     allowNull: false
