@@ -95,6 +95,14 @@ app.get('/health', (req, res) => {
   res.send({ ok: true, service: '今日食何云托管服务' });
 });
 
+app.post('/api/ping', (req, res) => {
+  res.send({
+    ok: true,
+    body: req.body || {},
+    openid: req.headers['x-wx-openid'] || ''
+  });
+});
+
 app.post('/api/login', async (req, res) => {
   const user = await upsertUser(req, req.body || {});
   res.send({ user });
