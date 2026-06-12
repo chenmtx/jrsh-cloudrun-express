@@ -48,6 +48,15 @@ function makeDefaultNickname() {
   return `吃货玩家${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
+function makeDefaultKitchenName(nickname) {
+  const displayName = String(nickname || '').trim() || '吃货玩家';
+  return `${displayName}的厨房`;
+}
+
+function isLegacyDefaultKitchenName(name) {
+  return !name || String(name).trim() === '用户xnhOS的厨房';
+}
+
 function isNumericUserId(id) {
   return /^\d{8}$/.test(String(id || ''));
 }
@@ -205,7 +214,9 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
     id: kitchenId
   };
 
-  if (!kitchenInfo.name) kitchenInfo.name = '用户xnhOS的厨房';
+  if (isLegacyDefaultKitchenName(kitchenInfo.name)) {
+    kitchenInfo.name = options.defaultKitchenName || makeDefaultKitchenName();
+  }
   if (kitchenInfo.announcement === undefined) kitchenInfo.announcement = '欢迎光临本小店，祝您用餐愉快！';
   if (kitchenInfo.logo === undefined) kitchenInfo.logo = '';
 
@@ -226,23 +237,35 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
   return payload;
 }
 
-async function ensureDefaultKitchenForUser(userId, state = {}) {
+async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
+  const defaultKitchenName = makeDefaultKitchenName(user.nickname);
   let kitchen = await Kitchen.findOne({
     where: { ownerUserId: userId },
     order: [['updatedAt', 'DESC']]
   });
   kitchen = await migrateLegacyKitchen(kitchen);
-  if (kitchen) return kitchen;
+  if (kitchen) {
+    const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+    const kitchenInfo = getKitchenInfoWithId(row.kitchenInfo, row.id);
+    if (isLegacyDefaultKitchenName(kitchenInfo.name)) {
+      kitchenInfo.name = defaultKitchenName;
+      await kitchen.update({ kitchenInfo: stringifyJson(kitchenInfo, {}) });
+    }
+    return kitchen;
+  }
 
   const localKitchenId = state.kitchenInfo && state.kitchenInfo.id;
   const kitchenId = isNumericKitchenId(localKitchenId) ? localKitchenId : await makeNumericKitchenId();
-  const options = localKitchenId && localKitchenId !== kitchenId ? { legacyId: localKitchenId } : {};
+  const options = {
+    ...(localKitchenId && localKitchenId !== kitchenId ? { legacyId: localKitchenId } : {}),
+    defaultKitchenName
+  };
   return Kitchen.create(normalizeKitchenState(kitchenId, userId, state, options));
 }
 
 function toClientState(kitchen) {
   const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
-  const kitchenInfo = parseJson(row.kitchenInfo, { id: row.id, name: '用户xnhOS的厨房' });
+  const kitchenInfo = parseJson(row.kitchenInfo, { id: row.id, name: makeDefaultKitchenName() });
   return {
     kitchenId: row.id,
     ownerUserId: row.ownerUserId,
@@ -277,7 +300,7 @@ app.post('/api/ping', (req, res) => {
 app.post('/api/login', asyncHandler(async (req, res) => {
   const body = req.body || {};
   const user = await upsertUser(req, body);
-  const kitchen = await ensureDefaultKitchenForUser(user.id, body.localState || {});
+  const kitchen = await ensureDefaultKitchenForUser(user.id, body.localState || {}, user);
   res.send({ user, ...toClientState(kitchen) });
 }));
 
@@ -288,7 +311,8 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   const requestedKitchenId = body.kitchenId || '';
   const ownerKitchen = await ensureDefaultKitchenForUser(
     user.id,
-    requestedKitchenId ? {} : localState
+    requestedKitchenId ? {} : localState,
+    user
   );
   let kitchen = requestedKitchenId ? await findKitchenByIdOrLegacy(requestedKitchenId) : ownerKitchen;
 
