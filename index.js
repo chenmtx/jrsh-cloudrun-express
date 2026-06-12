@@ -165,7 +165,8 @@ async function migrateLegacyUser(legacyUser, loginKey) {
     id: numericId,
     openid: loginKey,
     nickname: isBaseDefaultNickname(legacyUser.nickname) ? makeDefaultNickname() : legacyUser.nickname,
-    avatar: legacyUser.avatar || ''
+    avatar: legacyUser.avatar || '',
+    defaultOrderNote: legacyUser.defaultOrderNote || ''
   });
 
   await Kitchen.update(
@@ -187,8 +188,13 @@ async function upsertUser(req, body = {}) {
 
   const incomingNickname = typeof body.nickname === 'string' ? body.nickname.trim() : '';
   const incomingAvatar = typeof body.avatar === 'string' ? body.avatar.trim() : '';
+  const hasDefaultOrderNote = Object.prototype.hasOwnProperty.call(body, 'defaultOrderNote');
+  const incomingDefaultOrderNote = hasDefaultOrderNote && typeof body.defaultOrderNote === 'string'
+    ? body.defaultOrderNote.trim().slice(0, 300)
+    : '';
   const currentNickname = current && current.nickname;
   const currentAvatar = current && current.avatar;
+  const currentDefaultOrderNote = current && current.defaultOrderNote;
   const nickname = isBaseDefaultNickname(incomingNickname)
     ? (isBaseDefaultNickname(currentNickname) ? makeDefaultNickname() : currentNickname)
     : incomingNickname;
@@ -196,7 +202,8 @@ async function upsertUser(req, body = {}) {
     id: current ? current.id : await makeNumericUserId(),
     openid: loginKey,
     nickname,
-    avatar: incomingAvatar || currentAvatar || ''
+    avatar: incomingAvatar || currentAvatar || '',
+    defaultOrderNote: hasDefaultOrderNote ? incomingDefaultOrderNote : (currentDefaultOrderNote || '')
   };
 
   if (current) {

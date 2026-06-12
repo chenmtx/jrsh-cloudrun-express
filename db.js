@@ -37,6 +37,11 @@ const User = sequelize.define('JrshUser', {
   avatar: {
     type: DataTypes.TEXT('long'),
     allowNull: true
+  },
+  defaultOrderNote: {
+    type: DataTypes.STRING(300),
+    allowNull: true,
+    defaultValue: ''
   }
 });
 
