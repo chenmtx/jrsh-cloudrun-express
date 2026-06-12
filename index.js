@@ -118,11 +118,19 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   const body = req.body || {};
   const user = await upsertUser(req, body);
   const localState = body.localState || {};
-  const requestedKitchenId = body.kitchenId || (localState.kitchenInfo && localState.kitchenInfo.id);
+  const requestedKitchenId = body.kitchenId || '';
   let kitchen = requestedKitchenId ? await Kitchen.findByPk(requestedKitchenId) : null;
 
+  if (!kitchen && !requestedKitchenId) {
+    kitchen = await Kitchen.findOne({
+      where: { ownerUserId: user.id },
+      order: [['updatedAt', 'DESC']]
+    });
+  }
+
   if (!kitchen) {
-    const kitchenId = requestedKitchenId || makeId('kit');
+    const localKitchenId = localState.kitchenInfo && localState.kitchenInfo.id;
+    const kitchenId = requestedKitchenId || localKitchenId || makeId('kit');
     kitchen = await Kitchen.create(normalizeKitchenState(kitchenId, user.id, localState));
   }
 
