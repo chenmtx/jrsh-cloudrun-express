@@ -24,6 +24,11 @@ const User = sequelize.define('JrshUser', {
     type: DataTypes.STRING(128),
     primaryKey: true
   },
+  openid: {
+    type: DataTypes.STRING(128),
+    allowNull: true,
+    unique: true
+  },
   nickname: {
     type: DataTypes.STRING(100),
     allowNull: false,

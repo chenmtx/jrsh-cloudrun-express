@@ -48,18 +48,57 @@ function makeDefaultNickname() {
   return `吃货玩家${Math.floor(1000 + Math.random() * 9000)}`;
 }
 
+function isNumericUserId(id) {
+  return /^\d{8}$/.test(String(id || ''));
+}
+
+async function makeNumericUserId() {
+  for (let i = 0; i < 30; i += 1) {
+    const id = String(Math.floor(10000000 + Math.random() * 90000000));
+    const existing = await User.findByPk(id);
+    if (!existing) return id;
+  }
+  return String(Date.now()).slice(-8);
+}
+
+async function migrateLegacyUser(legacyUser, loginKey) {
+  if (!legacyUser || isNumericUserId(legacyUser.id)) return legacyUser;
+
+  const numericId = await makeNumericUserId();
+  const migrated = await User.create({
+    id: numericId,
+    openid: loginKey,
+    nickname: isBaseDefaultNickname(legacyUser.nickname) ? makeDefaultNickname() : legacyUser.nickname,
+    avatar: ''
+  });
+
+  await Kitchen.update(
+    { ownerUserId: numericId },
+    { where: { ownerUserId: legacyUser.id } }
+  );
+  await legacyUser.destroy();
+
+  return migrated;
+}
+
 async function upsertUser(req, body = {}) {
-  const id = getRequestUserId(req, body);
-  const current = await User.findByPk(id);
+  const loginKey = getRequestUserId(req, body);
+  let current = await User.findOne({ where: { openid: loginKey } });
+  if (!current) {
+    const legacyUser = await User.findByPk(loginKey);
+    current = await migrateLegacyUser(legacyUser, loginKey);
+  }
+
   const incomingNickname = typeof body.nickname === 'string' ? body.nickname.trim() : '';
   const currentNickname = current && current.nickname;
   const nickname = isBaseDefaultNickname(incomingNickname)
     ? (isBaseDefaultNickname(currentNickname) ? makeDefaultNickname() : currentNickname)
     : incomingNickname;
   const next = {
-    id,
+    id: current ? current.id : await makeNumericUserId(),
+    openid: loginKey,
     nickname,
-    avatar: body.avatar || (current && current.avatar) || ''
+    avatar: ''
   };
 
   if (current) {
