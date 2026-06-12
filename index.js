@@ -28,6 +28,12 @@ function stringifyJson(value, fallback) {
   return JSON.stringify(value === undefined ? fallback : value);
 }
 
+function asyncHandler(handler) {
+  return (req, res, next) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
 function getRequestUserId(req, body = {}) {
   const wxOpenid = req.headers['x-wx-openid'];
   if (wxOpenid) return `wx_${wxOpenid}`;
@@ -40,7 +46,7 @@ async function upsertUser(req, body = {}) {
   const next = {
     id,
     nickname: body.nickname || (current && current.nickname) || '吃货玩家',
-    avatar: body.avatar || (current && current.avatar) || '🐱'
+    avatar: body.avatar || (current && current.avatar) || ''
   };
 
   if (current) {
@@ -103,12 +109,12 @@ app.post('/api/ping', (req, res) => {
   });
 });
 
-app.post('/api/login', async (req, res) => {
+app.post('/api/login', asyncHandler(async (req, res) => {
   const user = await upsertUser(req, req.body || {});
   res.send({ user });
-});
+}));
 
-app.post('/api/bootstrap', async (req, res) => {
+app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   const body = req.body || {};
   const user = await upsertUser(req, body);
   const localState = body.localState || {};
@@ -124,9 +130,9 @@ app.post('/api/bootstrap', async (req, res) => {
     user,
     ...toClientState(kitchen)
   });
-});
+}));
 
-app.get('/api/kitchens/:id/state', async (req, res) => {
+app.get('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
   const kitchen = await Kitchen.findByPk(req.params.id);
   if (!kitchen) {
     res.status(404).send({ error: 'Kitchen not found' });
@@ -134,9 +140,9 @@ app.get('/api/kitchens/:id/state', async (req, res) => {
   }
 
   res.send(toClientState(kitchen));
-});
+}));
 
-app.post('/api/kitchens/:id/state', async (req, res) => {
+app.post('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
   const kitchenId = req.params.id;
   const body = req.body || {};
   const current = await Kitchen.findByPk(kitchenId);
@@ -151,6 +157,15 @@ app.post('/api/kitchens/:id/state', async (req, res) => {
   }
 
   res.send(toClientState(kitchen));
+}));
+
+app.use((err, req, res, next) => {
+  console.error('接口执行失败', err);
+  res.status(500).send({
+    ok: false,
+    error: err.name || 'Error',
+    message: err.message || 'server error'
+  });
 });
 
 const port = process.env.PORT || 80;
