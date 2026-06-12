@@ -224,6 +224,20 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
   return payload;
 }
 
+async function ensureDefaultKitchenForUser(userId, state = {}) {
+  let kitchen = await Kitchen.findOne({
+    where: { ownerUserId: userId },
+    order: [['updatedAt', 'DESC']]
+  });
+  kitchen = await migrateLegacyKitchen(kitchen);
+  if (kitchen) return kitchen;
+
+  const localKitchenId = state.kitchenInfo && state.kitchenInfo.id;
+  const kitchenId = isNumericKitchenId(localKitchenId) ? localKitchenId : await makeNumericKitchenId();
+  const options = localKitchenId && localKitchenId !== kitchenId ? { legacyId: localKitchenId } : {};
+  return Kitchen.create(normalizeKitchenState(kitchenId, userId, state, options));
+}
+
 function toClientState(kitchen) {
   const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
   const kitchenInfo = parseJson(row.kitchenInfo, { id: row.id, name: '用户xnhOS的厨房' });
@@ -259,8 +273,10 @@ app.post('/api/ping', (req, res) => {
 });
 
 app.post('/api/login', asyncHandler(async (req, res) => {
-  const user = await upsertUser(req, req.body || {});
-  res.send({ user });
+  const body = req.body || {};
+  const user = await upsertUser(req, body);
+  const kitchen = await ensureDefaultKitchenForUser(user.id, body.localState || {});
+  res.send({ user, ...toClientState(kitchen) });
 }));
 
 app.post('/api/bootstrap', asyncHandler(async (req, res) => {
@@ -268,22 +284,14 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   const user = await upsertUser(req, body);
   const localState = body.localState || {};
   const requestedKitchenId = body.kitchenId || '';
-  let kitchen = requestedKitchenId ? await findKitchenByIdOrLegacy(requestedKitchenId) : null;
-
-  if (!kitchen && !requestedKitchenId) {
-    kitchen = await Kitchen.findOne({
-      where: { ownerUserId: user.id },
-      order: [['updatedAt', 'DESC']]
-    });
-    kitchen = await migrateLegacyKitchen(kitchen);
-  }
+  const ownerKitchen = await ensureDefaultKitchenForUser(
+    user.id,
+    requestedKitchenId ? {} : localState
+  );
+  let kitchen = requestedKitchenId ? await findKitchenByIdOrLegacy(requestedKitchenId) : ownerKitchen;
 
   if (!kitchen) {
-    const localKitchenId = localState.kitchenInfo && localState.kitchenInfo.id;
-    const sourceKitchenId = requestedKitchenId || localKitchenId || '';
-    const kitchenId = isNumericKitchenId(sourceKitchenId) ? sourceKitchenId : await makeNumericKitchenId();
-    const options = sourceKitchenId && sourceKitchenId !== kitchenId ? { legacyId: sourceKitchenId } : {};
-    kitchen = await Kitchen.create(normalizeKitchenState(kitchenId, user.id, localState, options));
+    kitchen = ownerKitchen;
   }
 
   res.send({
