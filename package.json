@@ -1,13 +1,11 @@
 {
-  "name": "wxcloudrun-express",
+  "name": "jrshe-cloudrun-express",
   "version": "1.0.0",
-  "description": "微信云托管 express 框架模版",
+  "description": "今日食何微信云托管后端",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
-  "author": "",
-  "license": "Apache-2.0",
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.16.4",

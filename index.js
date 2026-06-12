@@ -1,52 +1,148 @@
-const path = require("path");
-const express = require("express");
-const cors = require("cors");
-const morgan = require("morgan");
-const { init: initDB, Counter } = require("./db");
-
-const logger = morgan("tiny");
+const path = require('path');
+const express = require('express');
+const cors = require('cors');
+const morgan = require('morgan');
+const { init: initDB, User, Kitchen } = require('./db');
 
 const app = express();
+
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 app.use(cors());
-app.use(logger);
+app.use(morgan('tiny'));
 
-// 首页
-app.get("/", async (req, res) => {
-  res.sendFile(path.join(__dirname, "index.html"));
+function makeId(prefix) {
+  return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function parseJson(raw, fallback) {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    return fallback;
+  }
+}
+
+function stringifyJson(value, fallback) {
+  return JSON.stringify(value === undefined ? fallback : value);
+}
+
+function getRequestUserId(req, body = {}) {
+  const wxOpenid = req.headers['x-wx-openid'];
+  if (wxOpenid) return `wx_${wxOpenid}`;
+  return body.clientUserId || body.userId || makeId('user');
+}
+
+async function upsertUser(req, body = {}) {
+  const id = getRequestUserId(req, body);
+  const current = await User.findByPk(id);
+  const next = {
+    id,
+    nickname: body.nickname || (current && current.nickname) || '吃货玩家',
+    avatar: body.avatar || (current && current.avatar) || '🐱'
+  };
+
+  if (current) {
+    await current.update(next);
+    return current.toJSON();
+  }
+
+  const created = await User.create(next);
+  return created.toJSON();
+}
+
+function normalizeKitchenState(kitchenId, ownerUserId, state = {}) {
+  const kitchenInfo = {
+    ...(state.kitchenInfo || {}),
+    id: kitchenId
+  };
+
+  if (!kitchenInfo.name) kitchenInfo.name = '用户xnhOS的厨房';
+  if (kitchenInfo.announcement === undefined) kitchenInfo.announcement = '欢迎光临本小店，祝您用餐愉快！';
+  if (kitchenInfo.logo === undefined) kitchenInfo.logo = '';
+
+  return {
+    id: kitchenId,
+    ownerUserId,
+    kitchenInfo: stringifyJson(kitchenInfo, {}),
+    categories: stringifyJson(Array.isArray(state.categories) ? state.categories : ['未分类'], []),
+    dishes: stringifyJson(Array.isArray(state.dishes) ? state.dishes : [], []),
+    orders: stringifyJson(Array.isArray(state.orders) ? state.orders : [], []),
+    lastQueueCode: state.lastQueueCode || null
+  };
+}
+
+function toClientState(kitchen) {
+  const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  return {
+    kitchenId: row.id,
+    ownerUserId: row.ownerUserId,
+    kitchenInfo: parseJson(row.kitchenInfo, { id: row.id, name: '用户xnhOS的厨房' }),
+    categories: parseJson(row.categories, []),
+    dishes: parseJson(row.dishes, []),
+    orders: parseJson(row.orders, []),
+    lastQueueCode: row.lastQueueCode || null,
+    updatedAt: row.updatedAt
+  };
+}
+
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-// 更新计数
-app.post("/api/count", async (req, res) => {
-  const { action } = req.body;
-  if (action === "inc") {
-    await Counter.create();
-  } else if (action === "clear") {
-    await Counter.destroy({
-      truncate: true,
-    });
+app.get('/health', (req, res) => {
+  res.send({ ok: true, service: '今日食何云托管服务' });
+});
+
+app.post('/api/login', async (req, res) => {
+  const user = await upsertUser(req, req.body || {});
+  res.send({ user });
+});
+
+app.post('/api/bootstrap', async (req, res) => {
+  const body = req.body || {};
+  const user = await upsertUser(req, body);
+  const localState = body.localState || {};
+  const requestedKitchenId = body.kitchenId || (localState.kitchenInfo && localState.kitchenInfo.id);
+  let kitchen = requestedKitchenId ? await Kitchen.findByPk(requestedKitchenId) : null;
+
+  if (!kitchen) {
+    const kitchenId = requestedKitchenId || makeId('kit');
+    kitchen = await Kitchen.create(normalizeKitchenState(kitchenId, user.id, localState));
   }
+
   res.send({
-    code: 0,
-    data: await Counter.count(),
+    user,
+    ...toClientState(kitchen)
   });
 });
 
-// 获取计数
-app.get("/api/count", async (req, res) => {
-  const result = await Counter.count();
-  res.send({
-    code: 0,
-    data: result,
-  });
+app.get('/api/kitchens/:id/state', async (req, res) => {
+  const kitchen = await Kitchen.findByPk(req.params.id);
+  if (!kitchen) {
+    res.status(404).send({ error: 'Kitchen not found' });
+    return;
+  }
+
+  res.send(toClientState(kitchen));
 });
 
-// 小程序调用，获取微信 Open ID
-app.get("/api/wx_openid", async (req, res) => {
-  if (req.headers["x-wx-source"]) {
-    res.send(req.headers["x-wx-openid"]);
+app.post('/api/kitchens/:id/state', async (req, res) => {
+  const kitchenId = req.params.id;
+  const body = req.body || {};
+  const current = await Kitchen.findByPk(kitchenId);
+  const ownerUserId = current ? current.ownerUserId : (body.userId || getRequestUserId(req, body));
+  const payload = normalizeKitchenState(kitchenId, ownerUserId, body.state || {});
+
+  let kitchen = current;
+  if (kitchen) {
+    await kitchen.update(payload);
+  } else {
+    kitchen = await Kitchen.create(payload);
   }
+
+  res.send(toClientState(kitchen));
 });
 
 const port = process.env.PORT || 80;
@@ -54,8 +150,11 @@ const port = process.env.PORT || 80;
 async function bootstrap() {
   await initDB();
   app.listen(port, () => {
-    console.log("启动成功", port);
+    console.log('启动成功', port);
   });
 }
 
-bootstrap();
+bootstrap().catch(err => {
+  console.error('启动失败', err);
+  process.exit(1);
+});

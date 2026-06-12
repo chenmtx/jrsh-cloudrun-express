@@ -1,32 +1,79 @@
-const { Sequelize, DataTypes } = require("sequelize");
+const { Sequelize, DataTypes } = require('sequelize');
 
-// 从环境变量中读取数据库配置
-const { MYSQL_USERNAME, MYSQL_PASSWORD, MYSQL_ADDRESS = "" } = process.env;
+const {
+  MYSQL_USERNAME,
+  MYSQL_PASSWORD,
+  MYSQL_ADDRESS = '',
+  MYSQL_DATABASE = 'nodejs_demo'
+} = process.env;
 
-const [host, port] = MYSQL_ADDRESS.split(":");
+const [host, port] = MYSQL_ADDRESS.split(':');
 
-const sequelize = new Sequelize("nodejs_demo", MYSQL_USERNAME, MYSQL_PASSWORD, {
+const sequelize = new Sequelize(MYSQL_DATABASE, MYSQL_USERNAME, MYSQL_PASSWORD, {
   host,
   port,
-  dialect: "mysql" /* one of 'mysql' | 'mariadb' | 'postgres' | 'mssql' */,
+  dialect: 'mysql',
+  logging: false,
+  define: {
+    freezeTableName: true
+  }
 });
 
-// 定义数据模型
-const Counter = sequelize.define("Counter", {
-  count: {
-    type: DataTypes.INTEGER,
-    allowNull: false,
-    defaultValue: 1,
+const User = sequelize.define('JrshUser', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
   },
+  nickname: {
+    type: DataTypes.STRING(100),
+    allowNull: false,
+    defaultValue: '吃货玩家'
+  },
+  avatar: {
+    type: DataTypes.TEXT,
+    allowNull: true
+  }
 });
 
-// 数据库初始化方法
+const Kitchen = sequelize.define('JrshKitchen', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
+  },
+  ownerUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  kitchenInfo: {
+    type: DataTypes.TEXT('long'),
+    allowNull: false
+  },
+  categories: {
+    type: DataTypes.TEXT('long'),
+    allowNull: false
+  },
+  dishes: {
+    type: DataTypes.TEXT('long'),
+    allowNull: false
+  },
+  orders: {
+    type: DataTypes.TEXT('long'),
+    allowNull: false
+  },
+  lastQueueCode: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  }
+});
+
 async function init() {
-  await Counter.sync({ alter: true });
+  await sequelize.authenticate();
+  await User.sync({ alter: true });
+  await Kitchen.sync({ alter: true });
 }
 
-// 导出初始化方法和模型
 module.exports = {
   init,
-  Counter,
+  User,
+  Kitchen
 };
