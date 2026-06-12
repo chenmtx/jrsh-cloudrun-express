@@ -7,7 +7,7 @@ const { init: initDB, User, Kitchen } = require('./db');
 const app = express();
 
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '30mb' }));
 app.use(cors());
 app.use(morgan('tiny'));
 

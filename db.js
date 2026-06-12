@@ -35,7 +35,7 @@ const User = sequelize.define('JrshUser', {
     defaultValue: '吃货玩家'
   },
   avatar: {
-    type: DataTypes.TEXT,
+    type: DataTypes.TEXT('long'),
     allowNull: true
   }
 });
