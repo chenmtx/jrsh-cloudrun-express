@@ -40,12 +40,25 @@ function getRequestUserId(req, body = {}) {
   return body.clientUserId || body.userId || makeId('user');
 }
 
+function isBaseDefaultNickname(nickname) {
+  return !nickname || String(nickname).trim() === '吃货玩家';
+}
+
+function makeDefaultNickname() {
+  return `吃货玩家${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
 async function upsertUser(req, body = {}) {
   const id = getRequestUserId(req, body);
   const current = await User.findByPk(id);
+  const incomingNickname = typeof body.nickname === 'string' ? body.nickname.trim() : '';
+  const currentNickname = current && current.nickname;
+  const nickname = isBaseDefaultNickname(incomingNickname)
+    ? (isBaseDefaultNickname(currentNickname) ? makeDefaultNickname() : currentNickname)
+    : incomingNickname;
   const next = {
     id,
-    nickname: body.nickname || (current && current.nickname) || '吃货玩家',
+    nickname,
     avatar: body.avatar || (current && current.avatar) || ''
   };
 
