@@ -156,7 +156,7 @@ async function migrateLegacyUser(legacyUser, loginKey) {
     id: numericId,
     openid: loginKey,
     nickname: isBaseDefaultNickname(legacyUser.nickname) ? makeDefaultNickname() : legacyUser.nickname,
-    avatar: ''
+    avatar: legacyUser.avatar || ''
   });
 
   await Kitchen.update(
@@ -177,7 +177,9 @@ async function upsertUser(req, body = {}) {
   }
 
   const incomingNickname = typeof body.nickname === 'string' ? body.nickname.trim() : '';
+  const incomingAvatar = typeof body.avatar === 'string' ? body.avatar.trim() : '';
   const currentNickname = current && current.nickname;
+  const currentAvatar = current && current.avatar;
   const nickname = isBaseDefaultNickname(incomingNickname)
     ? (isBaseDefaultNickname(currentNickname) ? makeDefaultNickname() : currentNickname)
     : incomingNickname;
@@ -185,7 +187,7 @@ async function upsertUser(req, body = {}) {
     id: current ? current.id : await makeNumericUserId(),
     openid: loginKey,
     nickname,
-    avatar: ''
+    avatar: incomingAvatar || currentAvatar || ''
   };
 
   if (current) {
