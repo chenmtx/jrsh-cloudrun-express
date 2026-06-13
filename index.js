@@ -993,12 +993,18 @@ app.post('/api/cabbage/transfer', asyncHandler(async (req, res) => {
   const nextRecipientBalance = formatCabbageNumber(recipientBalance + transferAmount, 0);
   const senderName = String(senderRow.nickname || '').trim() || '好友';
   const recipientName = String(recipientRow.nickname || '').trim() || '好友';
+  const senderDesc = typeof body.senderDesc === 'string' && body.senderDesc.trim()
+    ? body.senderDesc.trim().slice(0, 160)
+    : `好友转赠给${recipientName}`;
+  const recipientDesc = typeof body.recipientDesc === 'string' && body.recipientDesc.trim()
+    ? body.recipientDesc.trim().slice(0, 160)
+    : `好友转赠来自${senderName}`;
   const nextSenderHistory = [
-    makeCabbageHistoryEntry('sub', transferAmount, `好友转赠给${recipientName}`, nextSenderBalance),
+    makeCabbageHistoryEntry('sub', transferAmount, senderDesc, nextSenderBalance),
     ...parseUserCabbageHistory(senderRow, senderBalance)
   ];
   const nextRecipientHistory = [
-    makeCabbageHistoryEntry('add', transferAmount, `好友转赠来自${senderName}`, nextRecipientBalance),
+    makeCabbageHistoryEntry('add', transferAmount, recipientDesc, nextRecipientBalance),
     ...parseUserCabbageHistory(recipientRow, recipientBalance)
   ];
 
