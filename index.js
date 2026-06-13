@@ -504,9 +504,20 @@ async function upsertUser(req, body = {}) {
   const currentNickname = current && current.nickname;
   const currentAvatar = current && current.avatar;
   const currentDefaultOrderNote = current && current.defaultOrderNote;
-  const nickname = isBaseDefaultNickname(incomingNickname)
-    ? (isBaseDefaultNickname(currentNickname) ? makeDefaultNickname() : currentNickname)
-    : incomingNickname;
+  const allowProfileMutation = !debugSwitchUserId;
+  const nickname = allowProfileMutation
+    ? (
+        isBaseDefaultNickname(incomingNickname)
+          ? (isBaseDefaultNickname(currentNickname) ? makeDefaultNickname() : currentNickname)
+          : incomingNickname
+      )
+    : (currentNickname || makeDefaultNickname());
+  const avatar = allowProfileMutation
+    ? (incomingAvatar || currentAvatar || '')
+    : (currentAvatar || '');
+  const defaultOrderNote = allowProfileMutation
+    ? (hasDefaultOrderNote ? incomingDefaultOrderNote : (currentDefaultOrderNote || ''))
+    : (currentDefaultOrderNote || '');
   const hasCabbageBalance = Object.prototype.hasOwnProperty.call(body, 'cabbageBalance');
   const incomingCabbageBalance = hasCabbageBalance ? formatCabbageNumber(body.cabbageBalance, 2200.00) : 2200.00;
   const currentCabbageBalance = current && current.cabbageBalance;
@@ -525,8 +536,8 @@ async function upsertUser(req, body = {}) {
       ? (debugSwitchUserId ? (current.openid || null) : loginKey)
       : loginKey,
     nickname,
-    avatar: incomingAvatar || currentAvatar || '',
-    defaultOrderNote: hasDefaultOrderNote ? incomingDefaultOrderNote : (currentDefaultOrderNote || ''),
+    avatar,
+    defaultOrderNote,
     // Existing users treat the database as the source of truth for cabbage data.
     // Login/bootstrap must not overwrite remote balance with local default 2200 after cache clear.
     cabbageBalance: persistedCabbageBalance,
@@ -540,6 +551,31 @@ async function upsertUser(req, body = {}) {
 
   const created = await User.create(next);
   return toClientUser(created);
+}
+
+async function updateUserProfileById(userId, body = {}) {
+  const current = await findUserByIdOrLoginKey(userId);
+  if (!current) {
+    const err = new Error('User not found');
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const row = current.toJSON ? current.toJSON() : current;
+  const incomingNickname = typeof body.nickname === 'string' ? body.nickname.trim() : '';
+  const incomingAvatar = typeof body.avatar === 'string' ? body.avatar.trim() : '';
+  const hasDefaultOrderNote = Object.prototype.hasOwnProperty.call(body, 'defaultOrderNote');
+  const incomingDefaultOrderNote = hasDefaultOrderNote && typeof body.defaultOrderNote === 'string'
+    ? body.defaultOrderNote.trim().slice(0, 300)
+    : '';
+
+  await current.update({
+    nickname: incomingNickname || row.nickname || makeDefaultNickname(),
+    avatar: incomingAvatar || '',
+    defaultOrderNote: hasDefaultOrderNote ? incomingDefaultOrderNote : (row.defaultOrderNote || '')
+  });
+
+  return toClientUser(current);
 }
 
 async function findUserByIdOrLoginKey(id) {
@@ -677,6 +713,14 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   res.send({
     user: toClientUser(user),
     ...(await toClientState(kitchen))
+  });
+}));
+
+app.post('/api/users/:id/profile', asyncHandler(async (req, res) => {
+  const user = await updateUserProfileById(req.params.id, req.body || {});
+  res.send({
+    ok: true,
+    user: await toClientUserWithDecoratedHistory(user)
   });
 }));
 
