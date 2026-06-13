@@ -2,6 +2,7 @@ const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const { Op } = require('sequelize');
 const { sequelize, init: initDB, User, Kitchen, Order } = require('./db');
 
 const app = express();
@@ -112,6 +113,83 @@ function makeCabbageHistoryEntry(type, amount, desc, balanceAfter) {
     desc: typeof desc === 'string' ? desc : '',
     time: makeCabbageTime(),
     balanceAfter: formatCabbageNumberText(balanceAfter, 0)
+  };
+}
+
+function extractTransferUserIdFromHistoryDesc(desc) {
+  const text = typeof desc === 'string' ? desc.trim() : '';
+  if (!text) return '';
+
+  const patterns = [
+    /^好友转赠给用户\(([^)]+)\)$/,
+    /^好友转赠来自用户\(([^)]+)\)$/,
+    /^大白菜转赠-给用户\(([^)]+)\)$/
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match && match[1]) {
+      return String(match[1]).trim();
+    }
+  }
+  return '';
+}
+
+function formatTransferHistoryDesc(desc, nickname) {
+  const text = typeof desc === 'string' ? desc.trim() : '';
+  const displayName = String(nickname || '').trim() || '好友';
+
+  if (/^好友转赠给用户\([^)]+\)$/.test(text) || /^大白菜转赠-给用户\([^)]+\)$/.test(text)) {
+    return `好友转赠给${displayName}`;
+  }
+  if (/^好友转赠来自用户\([^)]+\)$/.test(text)) {
+    return `好友转赠来自${displayName}`;
+  }
+  return text;
+}
+
+async function decorateCabbageHistory(history) {
+  const normalizedHistory = normalizeCabbageHistory(history);
+  const relatedUserIds = Array.from(new Set(
+    normalizedHistory
+      .map(item => extractTransferUserIdFromHistoryDesc(item.desc))
+      .filter(Boolean)
+  ));
+
+  if (!relatedUserIds.length) {
+    return normalizedHistory;
+  }
+
+  const users = await User.findAll({
+    attributes: ['id', 'nickname'],
+    where: {
+      id: {
+        [Op.in]: relatedUserIds
+      }
+    }
+  });
+
+  const nicknameById = users.reduce((map, user) => {
+    const row = user.toJSON ? user.toJSON() : user;
+    map[String(row.id)] = row.nickname || '';
+    return map;
+  }, {});
+
+  return normalizedHistory.map(item => {
+    const relatedUserId = extractTransferUserIdFromHistoryDesc(item.desc);
+    if (!relatedUserId) return item;
+    return {
+      ...item,
+      desc: formatTransferHistoryDesc(item.desc, nicknameById[relatedUserId])
+    };
+  });
+}
+
+async function toClientUserWithDecoratedHistory(user) {
+  const clientUser = toClientUser(user);
+  return {
+    ...clientUser,
+    cabbageHistory: await decorateCabbageHistory(clientUser.cabbageHistory)
   };
 }
 
@@ -609,7 +687,7 @@ app.get('/api/users/:id/cabbage', asyncHandler(async (req, res) => {
     return;
   }
 
-  const current = toClientUser(user);
+  const current = await toClientUserWithDecoratedHistory(user);
   res.send({
     userId: current.id,
     balance: current.cabbageBalance,
@@ -639,10 +717,11 @@ app.post('/api/users/:id/cabbage', asyncHandler(async (req, res) => {
     cabbageHistory: stringifyJson(nextHistory, [])
   });
 
+  const decoratedHistory = await decorateCabbageHistory(nextHistory);
   res.send({
     userId: row.id,
     balance: formatCabbageNumberText(nextBalance),
-    history: nextHistory
+    history: decoratedHistory
   });
 }));
 
@@ -689,12 +768,14 @@ app.post('/api/cabbage/transfer', asyncHandler(async (req, res) => {
 
   const nextSenderBalance = formatCabbageNumber(senderBalance - transferAmount, 0);
   const nextRecipientBalance = formatCabbageNumber(recipientBalance + transferAmount, 0);
+  const senderName = String(senderRow.nickname || '').trim() || '好友';
+  const recipientName = String(recipientRow.nickname || '').trim() || '好友';
   const nextSenderHistory = [
-    makeCabbageHistoryEntry('sub', transferAmount, `好友转赠给用户(${recipientRow.id})`, nextSenderBalance),
+    makeCabbageHistoryEntry('sub', transferAmount, `好友转赠给${recipientName}`, nextSenderBalance),
     ...parseUserCabbageHistory(senderRow, senderBalance)
   ];
   const nextRecipientHistory = [
-    makeCabbageHistoryEntry('add', transferAmount, `好友转赠来自用户(${senderRow.id})`, nextRecipientBalance),
+    makeCabbageHistoryEntry('add', transferAmount, `好友转赠来自${senderName}`, nextRecipientBalance),
     ...parseUserCabbageHistory(recipientRow, recipientBalance)
   ];
 
@@ -715,8 +796,8 @@ app.post('/api/cabbage/transfer', asyncHandler(async (req, res) => {
   res.send({
     ok: true,
     amount: formatCabbageNumberText(transferAmount, 0),
-    sender: toClientUser(sender),
-    recipient: toClientUser(recipient)
+    sender: await toClientUserWithDecoratedHistory(sender),
+    recipient: await toClientUserWithDecoratedHistory(recipient)
   });
 }));
 
