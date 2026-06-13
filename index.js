@@ -41,6 +41,12 @@ function formatCabbageNumberText(value, fallback = 2200.00) {
   return formatCabbageNumber(value, fallback).toFixed(2);
 }
 
+function parseTransferAmount(value) {
+  const parsed = parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Number(parsed.toFixed(2));
+}
+
 function makeCabbageTime(date = new Date()) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
 }
@@ -94,6 +100,18 @@ function toClientUser(user) {
     ...row,
     cabbageBalance,
     cabbageHistory: parseUserCabbageHistory(row, cabbageBalance)
+  };
+}
+
+function makeCabbageHistoryEntry(type, amount, desc, balanceAfter) {
+  const normalizedAmount = formatCabbageNumberText(amount, 0);
+  return {
+    id: makeId('hist'),
+    type: type === 'sub' ? 'sub' : 'add',
+    amount: normalizedAmount,
+    desc: typeof desc === 'string' ? desc : '',
+    time: makeCabbageTime(),
+    balanceAfter: formatCabbageNumberText(balanceAfter, 0)
   };
 }
 
@@ -604,6 +622,80 @@ app.post('/api/users/:id/cabbage', asyncHandler(async (req, res) => {
     userId: row.id,
     balance: formatCabbageNumberText(nextBalance),
     history: nextHistory
+  });
+}));
+
+app.post('/api/cabbage/transfer', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const senderLoginKey = String(body.senderUserId || body.clientUserId || body.userId || getRequestUserId(req, body)).trim();
+  const recipientUserId = String(body.toUserId || body.recipientUserId || body.transferCode || '').trim();
+  const transferAmount = parseTransferAmount(body.amount);
+
+  if (!recipientUserId) {
+    res.status(400).send({ ok: false, error: 'Recipient required' });
+    return;
+  }
+  if (transferAmount === null) {
+    res.status(400).send({ ok: false, error: 'Invalid amount' });
+    return;
+  }
+
+  const sender = await findUserByIdOrLoginKey(senderLoginKey);
+  if (!sender) {
+    res.status(404).send({ ok: false, error: 'Sender not found' });
+    return;
+  }
+
+  const recipient = await findUserByIdOrLoginKey(recipientUserId);
+  if (!recipient) {
+    res.status(404).send({ ok: false, error: 'Recipient not found' });
+    return;
+  }
+
+  const senderRow = sender.toJSON ? sender.toJSON() : sender;
+  const recipientRow = recipient.toJSON ? recipient.toJSON() : recipient;
+  if (String(senderRow.id) === String(recipientRow.id)) {
+    res.status(400).send({ ok: false, error: 'Cannot transfer to self' });
+    return;
+  }
+
+  const senderBalance = formatCabbageNumber(senderRow.cabbageBalance, 2200.00);
+  const recipientBalance = formatCabbageNumber(recipientRow.cabbageBalance, 2200.00);
+  if (senderBalance < transferAmount) {
+    res.status(400).send({ ok: false, error: 'Insufficient balance' });
+    return;
+  }
+
+  const nextSenderBalance = formatCabbageNumber(senderBalance - transferAmount, 0);
+  const nextRecipientBalance = formatCabbageNumber(recipientBalance + transferAmount, 0);
+  const nextSenderHistory = [
+    makeCabbageHistoryEntry('sub', transferAmount, `好友转赠给用户(${recipientRow.id})`, nextSenderBalance),
+    ...parseUserCabbageHistory(senderRow, senderBalance)
+  ];
+  const nextRecipientHistory = [
+    makeCabbageHistoryEntry('add', transferAmount, `好友转赠来自用户(${senderRow.id})`, nextRecipientBalance),
+    ...parseUserCabbageHistory(recipientRow, recipientBalance)
+  ];
+
+  await sequelize.transaction(async transaction => {
+    await sender.update({
+      cabbageBalance: nextSenderBalance,
+      cabbageHistory: stringifyJson(nextSenderHistory, [])
+    }, { transaction });
+    await recipient.update({
+      cabbageBalance: nextRecipientBalance,
+      cabbageHistory: stringifyJson(nextRecipientHistory, [])
+    }, { transaction });
+  });
+
+  await sender.reload();
+  await recipient.reload();
+
+  res.send({
+    ok: true,
+    amount: formatCabbageNumberText(transferAmount, 0),
+    sender: toClientUser(sender),
+    recipient: toClientUser(recipient)
   });
 }));
 
