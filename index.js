@@ -8,7 +8,7 @@ const { sequelize, init: initDB, User, Kitchen, Order } = require('./db');
 const app = express();
 
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json({ limit: '30mb' }));
+app.use(express.json({ limit: '100mb' }));
 app.use(cors());
 app.use(morgan('tiny'));
 
@@ -898,6 +898,45 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
         updatedAt: row.updatedAt || null
       };
     })
+  });
+}));
+
+app.post('/api/kitchens/:id/catalog', asyncHandler(async (req, res) => {
+  const requestedKitchenId = req.params.id;
+  const body = req.body || {};
+  const current = await findKitchenByIdOrLegacy(requestedKitchenId);
+  const kitchenId = current
+    ? current.id
+    : (isNumericKitchenId(requestedKitchenId) ? requestedKitchenId : await makeNumericKitchenId());
+  const ownerUserId = current ? current.ownerUserId : (body.userId || getRequestUserId(req, body));
+  const categories = Array.isArray(body.categories) ? body.categories : ['未分类'];
+  const dishes = Array.isArray(body.dishes) ? body.dishes : [];
+
+  if (current) {
+    await current.update({
+      categories: stringifyJson(categories, []),
+      dishes: stringifyJson(dishes, [])
+    });
+  } else {
+    const options = requestedKitchenId && requestedKitchenId !== kitchenId
+      ? { legacyId: requestedKitchenId }
+      : {};
+    const normalizedState = normalizeKitchenState(kitchenId, ownerUserId, {
+      kitchenInfo: {
+        id: kitchenId,
+        name: makeDefaultKitchenName()
+      },
+      categories,
+      dishes,
+      orders: []
+    }, options);
+    await Kitchen.create(normalizedState.payload);
+  }
+
+  res.send({
+    ok: true,
+    kitchenId,
+    updatedAt: new Date().toISOString()
   });
 }));
 
