@@ -42,6 +42,15 @@ const User = sequelize.define('JrshUser', {
     type: DataTypes.STRING(300),
     allowNull: true,
     defaultValue: ''
+  },
+  cabbageBalance: {
+    type: DataTypes.DECIMAL(12, 2),
+    allowNull: false,
+    defaultValue: 2200.00
+  },
+  cabbageHistory: {
+    type: DataTypes.TEXT('long'),
+    allowNull: true
   }
 });
 

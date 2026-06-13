@@ -28,6 +28,75 @@ function stringifyJson(value, fallback) {
   return JSON.stringify(value === undefined ? fallback : value);
 }
 
+function formatCabbageNumber(value, fallback = 2200.00) {
+  const parsed = parseFloat(value);
+  if (Number.isNaN(parsed)) {
+    const fallbackParsed = parseFloat(fallback);
+    return Number.isNaN(fallbackParsed) ? 2200.00 : Number(fallbackParsed.toFixed(2));
+  }
+  return Number(parsed.toFixed(2));
+}
+
+function formatCabbageNumberText(value, fallback = 2200.00) {
+  return formatCabbageNumber(value, fallback).toFixed(2);
+}
+
+function makeCabbageTime(date = new Date()) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}:${String(date.getSeconds()).padStart(2, '0')}`;
+}
+
+function makeDefaultCabbageHistory(balance = 2200.00) {
+  const formattedBalance = formatCabbageNumberText(balance);
+  return [
+    {
+      id: makeId('hist'),
+      type: 'add',
+      amount: formattedBalance,
+      desc: '注册赠送',
+      time: makeCabbageTime(),
+      balanceAfter: formattedBalance
+    }
+  ];
+}
+
+function normalizeCabbageHistory(history, balance = 2200.00) {
+  const source = Array.isArray(history) ? history : parseJson(history, []);
+  if (!Array.isArray(source) || source.length === 0) {
+    return makeDefaultCabbageHistory(balance);
+  }
+
+  const normalized = source.reduce((result, item) => {
+    if (!item || typeof item !== 'object') return result;
+
+    result.push({
+      id: item.id || makeId('hist'),
+      type: item.type === 'sub' ? 'sub' : 'add',
+      amount: formatCabbageNumberText(item.amount, 0),
+      desc: typeof item.desc === 'string' ? item.desc : '',
+      time: typeof item.time === 'string' && item.time ? item.time : makeCabbageTime(),
+      balanceAfter: formatCabbageNumberText(item.balanceAfter, balance)
+    });
+    return result;
+  }, []);
+
+  return normalized.length > 0 ? normalized : makeDefaultCabbageHistory(balance);
+}
+
+function parseUserCabbageHistory(user, fallbackBalance = 2200.00) {
+  if (!user) return makeDefaultCabbageHistory(fallbackBalance);
+  return normalizeCabbageHistory(user.cabbageHistory, user.cabbageBalance !== undefined ? user.cabbageBalance : fallbackBalance);
+}
+
+function toClientUser(user) {
+  const row = user && user.toJSON ? user.toJSON() : (user || {});
+  const cabbageBalance = formatCabbageNumberText(row.cabbageBalance, 2200.00);
+  return {
+    ...row,
+    cabbageBalance,
+    cabbageHistory: parseUserCabbageHistory(row, cabbageBalance)
+  };
+}
+
 function asyncHandler(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(next);
@@ -160,13 +229,16 @@ async function findKitchenByIdOrLegacy(kitchenId) {
 async function migrateLegacyUser(legacyUser, loginKey) {
   if (!legacyUser || isNumericUserId(legacyUser.id)) return legacyUser;
 
+  const cabbageBalance = legacyUser.cabbageBalance !== undefined ? legacyUser.cabbageBalance : 2200.00;
   const numericId = await makeNumericUserId();
   const migrated = await User.create({
     id: numericId,
     openid: loginKey,
     nickname: isBaseDefaultNickname(legacyUser.nickname) ? makeDefaultNickname() : legacyUser.nickname,
     avatar: legacyUser.avatar || '',
-    defaultOrderNote: legacyUser.defaultOrderNote || ''
+    defaultOrderNote: legacyUser.defaultOrderNote || '',
+    cabbageBalance,
+    cabbageHistory: stringifyJson(parseUserCabbageHistory(legacyUser, cabbageBalance), [])
   });
 
   await Kitchen.update(
@@ -198,21 +270,44 @@ async function upsertUser(req, body = {}) {
   const nickname = isBaseDefaultNickname(incomingNickname)
     ? (isBaseDefaultNickname(currentNickname) ? makeDefaultNickname() : currentNickname)
     : incomingNickname;
+  const hasCabbageBalance = Object.prototype.hasOwnProperty.call(body, 'cabbageBalance');
+  const incomingCabbageBalance = hasCabbageBalance ? formatCabbageNumber(body.cabbageBalance, 2200.00) : 2200.00;
+  const currentCabbageBalance = current && current.cabbageBalance;
+  const incomingCabbageHistory = normalizeCabbageHistory(body.cabbageHistory, incomingCabbageBalance);
+  const currentCabbageHistory = current ? parseUserCabbageHistory(current, currentCabbageBalance) : [];
+
   const next = {
     id: current ? current.id : await makeNumericUserId(),
     openid: loginKey,
     nickname,
     avatar: incomingAvatar || currentAvatar || '',
-    defaultOrderNote: hasDefaultOrderNote ? incomingDefaultOrderNote : (currentDefaultOrderNote || '')
+    defaultOrderNote: hasDefaultOrderNote ? incomingDefaultOrderNote : (currentDefaultOrderNote || ''),
+    cabbageBalance: hasCabbageBalance ? incomingCabbageBalance : (current ? currentCabbageBalance : 2200.00),
+    cabbageHistory: stringifyJson(
+      current
+        ? (currentCabbageHistory.length > 0 ? currentCabbageHistory : incomingCabbageHistory)
+        : incomingCabbageHistory,
+      []
+    )
   };
 
   if (current) {
     await current.update(next);
-    return current.toJSON();
+    return toClientUser(current);
   }
 
   const created = await User.create(next);
-  return created.toJSON();
+  return toClientUser(created);
+}
+
+async function findUserByIdOrLoginKey(id) {
+  const normalizedId = String(id || '').trim();
+  if (!normalizedId) return null;
+
+  const current = await User.findByPk(normalizedId);
+  if (current) return current;
+
+  return User.findOne({ where: { openid: normalizedId } });
 }
 
 function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {}) {
@@ -308,7 +403,7 @@ app.post('/api/login', asyncHandler(async (req, res) => {
   const body = req.body || {};
   const user = await upsertUser(req, body);
   const kitchen = await ensureDefaultKitchenForUser(user.id, body.localState || {}, user);
-  res.send({ user, ...toClientState(kitchen) });
+  res.send({ user: toClientUser(user), ...toClientState(kitchen) });
 }));
 
 app.post('/api/bootstrap', asyncHandler(async (req, res) => {
@@ -328,8 +423,52 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   }
 
   res.send({
-    user,
+    user: toClientUser(user),
     ...toClientState(kitchen)
+  });
+}));
+
+app.get('/api/users/:id/cabbage', asyncHandler(async (req, res) => {
+  const user = await findUserByIdOrLoginKey(req.params.id);
+  if (!user) {
+    res.status(404).send({ error: 'User not found' });
+    return;
+  }
+
+  const current = toClientUser(user);
+  res.send({
+    userId: current.id,
+    balance: current.cabbageBalance,
+    history: current.cabbageHistory
+  });
+}));
+
+app.post('/api/users/:id/cabbage', asyncHandler(async (req, res) => {
+  const user = await findUserByIdOrLoginKey(req.params.id);
+  if (!user) {
+    res.status(404).send({ error: 'User not found' });
+    return;
+  }
+
+  const body = req.body || {};
+  const row = user.toJSON ? user.toJSON() : user;
+  const currentBalance = formatCabbageNumber(row.cabbageBalance, 2200.00);
+  const nextBalance = Object.prototype.hasOwnProperty.call(body, 'balance')
+    ? formatCabbageNumber(body.balance, currentBalance)
+    : currentBalance;
+  const nextHistory = Object.prototype.hasOwnProperty.call(body, 'history')
+    ? normalizeCabbageHistory(body.history, nextBalance)
+    : parseUserCabbageHistory(row, nextBalance);
+
+  await user.update({
+    cabbageBalance: nextBalance,
+    cabbageHistory: stringifyJson(nextHistory, [])
+  });
+
+  res.send({
+    userId: row.id,
+    balance: formatCabbageNumberText(nextBalance),
+    history: nextHistory
   });
 }));
 
