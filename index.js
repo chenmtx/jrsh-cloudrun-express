@@ -242,6 +242,11 @@ function getRequestUserId(req, body = {}) {
   return body.clientUserId || body.userId || makeId('user');
 }
 
+function getDebugSwitchUserId(req, body = {}) {
+  const raw = body.debugUserId || req.headers['x-debug-user-id'];
+  return raw ? String(raw).trim() : '';
+}
+
 function isBaseDefaultNickname(nickname) {
   return !nickname || String(nickname).trim() === '吃货玩家';
 }
@@ -393,11 +398,23 @@ async function migrateLegacyUser(legacyUser, loginKey) {
 }
 
 async function upsertUser(req, body = {}) {
+  const debugSwitchUserId = getDebugSwitchUserId(req, body);
   const loginKey = getRequestUserId(req, body);
-  let current = await User.findOne({ where: { openid: loginKey } });
-  if (!current) {
-    const legacyUser = await User.findByPk(loginKey);
-    current = await migrateLegacyUser(legacyUser, loginKey);
+  let current = null;
+
+  if (debugSwitchUserId) {
+    current = await User.findByPk(debugSwitchUserId);
+    if (!current) {
+      const err = new Error('Debug user not found');
+      err.statusCode = 404;
+      throw err;
+    }
+  } else {
+    current = await User.findOne({ where: { openid: loginKey } });
+    if (!current) {
+      const legacyUser = await User.findByPk(loginKey);
+      current = await migrateLegacyUser(legacyUser, loginKey);
+    }
   }
 
   const incomingNickname = typeof body.nickname === 'string' ? body.nickname.trim() : '';
@@ -424,7 +441,11 @@ async function upsertUser(req, body = {}) {
 
   const next = {
     id: current ? current.id : await makeNumericUserId(),
-    openid: loginKey,
+    // 调试切换用户只允许“借用会话”，不能改写用户原有的微信绑定标识，
+    // 否则切回真实账号时会被后端误判成新用户并重复建号。
+    openid: current
+      ? (debugSwitchUserId ? (current.openid || null) : loginKey)
+      : loginKey,
     nickname,
     avatar: incomingAvatar || currentAvatar || '',
     defaultOrderNote: hasDefaultOrderNote ? incomingDefaultOrderNote : (currentDefaultOrderNote || ''),
@@ -780,7 +801,8 @@ app.post('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
 
 app.use((err, req, res, next) => {
   console.error('接口执行失败', err);
-  res.status(500).send({
+  const statusCode = err.statusCode || err.status || 500;
+  res.status(statusCode).send({
     ok: false,
     error: err.name || 'Error',
     message: err.message || 'server error'
