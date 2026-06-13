@@ -217,6 +217,8 @@ function asyncHandler(handler) {
 }
 
 function getRequestUserId(req, body = {}) {
+  const debugUserId = body.debugUserId || req.headers['x-debug-user-id'];
+  if (debugUserId) return String(debugUserId).trim();
   const wxOpenid = req.headers['x-wx-openid'];
   if (wxOpenid) return `wx_${wxOpenid}`;
   return body.clientUserId || body.userId || makeId('user');
