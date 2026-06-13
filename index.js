@@ -840,6 +840,7 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   const user = await upsertUser(req, body);
   const localState = body.localState || {};
   const requestedKitchenId = body.kitchenId || '';
+  const strictKitchenId = !!body.strictKitchenId;
   const ownerKitchen = await ensureDefaultKitchenForUser(
     user.id,
     requestedKitchenId ? {} : localState,
@@ -847,12 +848,23 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   );
   let kitchen = requestedKitchenId ? await findKitchenByIdOrLegacy(requestedKitchenId) : ownerKitchen;
 
+  if (!kitchen && strictKitchenId) {
+    res.status(404).send({
+      ok: false,
+      error: 'Kitchen not found',
+      message: '厨房码不存在'
+    });
+    return;
+  }
+
   if (!kitchen) {
     kitchen = ownerKitchen;
   }
 
   res.send({
     user: toClientUser(user),
+    ownerKitchenId: ownerKitchen.id,
+    isVisitingKitchen: kitchen.id !== ownerKitchen.id,
     ...(await toClientState(kitchen))
   });
 }));
