@@ -137,10 +137,67 @@ const Order = sequelize.define('JrshOrder', {
   }
 });
 
+const Dish = sequelize.define('JrshDish', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
+  },
+  dishId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  kitchenId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  ownerUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  category: {
+    type: DataTypes.STRING(128),
+    allowNull: true
+  },
+  name: {
+    type: DataTypes.STRING(200),
+    allowNull: false
+  },
+  price: {
+    type: DataTypes.DECIMAL(12, 2),
+    allowNull: true
+  },
+  status: {
+    type: DataTypes.STRING(32),
+    allowNull: true
+  },
+  stars: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  stock: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  sales: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  sortIndex: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0
+  },
+  payload: {
+    type: DataTypes.TEXT('long'),
+    allowNull: false
+  }
+});
+
 async function init() {
   await sequelize.authenticate();
   await User.sync({ alter: true });
   await Kitchen.sync({ alter: true });
+  await Dish.sync({ alter: true });
   await Order.sync({ alter: true });
 }
 
@@ -149,5 +206,6 @@ module.exports = {
   init,
   User,
   Kitchen,
-  Order
+  Order,
+  Dish
 };
