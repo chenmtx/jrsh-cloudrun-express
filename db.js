@@ -90,14 +90,64 @@ const Kitchen = sequelize.define('JrshKitchen', {
   }
 });
 
+const Order = sequelize.define('JrshOrder', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
+  },
+  kitchenId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  ownerUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.STRING(32),
+    allowNull: true
+  },
+  queueCode: {
+    type: DataTypes.INTEGER,
+    allowNull: true
+  },
+  total: {
+    type: DataTypes.DECIMAL(12, 2),
+    allowNull: true
+  },
+  time: {
+    type: DataTypes.STRING(32),
+    allowNull: true
+  },
+  timeFull: {
+    type: DataTypes.STRING(32),
+    allowNull: true
+  },
+  userNickname: {
+    type: DataTypes.STRING(100),
+    allowNull: true
+  },
+  orderedAt: {
+    type: DataTypes.DATE,
+    allowNull: true
+  },
+  payload: {
+    type: DataTypes.TEXT('long'),
+    allowNull: false
+  }
+});
+
 async function init() {
   await sequelize.authenticate();
   await User.sync({ alter: true });
   await Kitchen.sync({ alter: true });
+  await Order.sync({ alter: true });
 }
 
 module.exports = {
+  sequelize,
   init,
   User,
-  Kitchen
+  Kitchen,
+  Order
 };

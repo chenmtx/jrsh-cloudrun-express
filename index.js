@@ -2,7 +2,7 @@ const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
-const { init: initDB, User, Kitchen } = require('./db');
+const { sequelize, init: initDB, User, Kitchen, Order } = require('./db');
 
 const app = express();
 
@@ -97,6 +97,119 @@ function toClientUser(user) {
   };
 }
 
+function normalizeOrderQueueCode(value) {
+  const parsed = parseInt(value, 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function normalizeOrderTotal(value) {
+  const parsed = parseFloat(value);
+  return Number.isNaN(parsed) ? null : Number(parsed.toFixed(2));
+}
+
+function parseOrderTimestamp(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return null;
+  const parsed = new Date(text.replace(' ', 'T'));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function normalizeOrderList(orders) {
+  const source = Array.isArray(orders) ? orders : parseJson(orders, []);
+  if (!Array.isArray(source)) return [];
+
+  const seenIds = new Set();
+  return source.reduce((result, item) => {
+    if (!item || typeof item !== 'object') return result;
+    const id = String(item.id || makeId('order'));
+    if (seenIds.has(id)) return result;
+    seenIds.add(id);
+    result.push({
+      ...item,
+      id
+    });
+    return result;
+  }, []);
+}
+
+function toOrderRow(kitchenId, ownerUserId, order) {
+  const normalized = {
+    ...order,
+    id: String(order.id || makeId('order'))
+  };
+  const time = typeof normalized.time === 'string' ? normalized.time.trim().slice(0, 32) : '';
+  const timeFull = typeof normalized.timeFull === 'string' ? normalized.timeFull.trim().slice(0, 32) : '';
+  return {
+    id: normalized.id,
+    kitchenId,
+    ownerUserId,
+    status: typeof normalized.status === 'string' ? normalized.status.slice(0, 32) : '',
+    queueCode: normalizeOrderQueueCode(normalized.queueCode),
+    total: normalizeOrderTotal(normalized.total),
+    time,
+    timeFull,
+    userNickname: typeof normalized.userNickname === 'string' ? normalized.userNickname.slice(0, 100) : '',
+    orderedAt: parseOrderTimestamp(timeFull),
+    payload: stringifyJson(normalized, {})
+  };
+}
+
+function toClientOrder(order) {
+  const row = order && order.toJSON ? order.toJSON() : (order || {});
+  const payload = parseJson(row.payload, {});
+  return {
+    ...payload,
+    id: row.id,
+    status: payload.status !== undefined ? payload.status : (row.status || ''),
+    queueCode: payload.queueCode !== undefined ? payload.queueCode : row.queueCode,
+    total: payload.total !== undefined ? payload.total : row.total,
+    time: payload.time !== undefined ? payload.time : (row.time || ''),
+    timeFull: payload.timeFull !== undefined ? payload.timeFull : (row.timeFull || ''),
+    userNickname: payload.userNickname !== undefined ? payload.userNickname : (row.userNickname || '')
+  };
+}
+
+async function replaceKitchenOrders(kitchenId, ownerUserId, orders, options = {}) {
+  const normalizedOrders = normalizeOrderList(orders);
+  await sequelize.transaction(async transaction => {
+    await Order.destroy({
+      where: { kitchenId },
+      transaction
+    });
+    if (normalizedOrders.length > 0) {
+      await Order.bulkCreate(
+        normalizedOrders.map(order => toOrderRow(kitchenId, ownerUserId, order)),
+        { transaction }
+      );
+    }
+    if (options.updateKitchenMirror) {
+      await Kitchen.update(
+        { orders: stringifyJson(normalizedOrders, []) },
+        {
+          where: { id: kitchenId },
+          transaction
+        }
+      );
+    }
+  });
+  return normalizedOrders;
+}
+
+async function loadKitchenOrders(kitchen) {
+  const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
+  const legacyOrders = normalizeOrderList(row.orders);
+  const query = {
+    where: { kitchenId: row.id },
+    order: [['orderedAt', 'ASC'], ['createdAt', 'ASC'], ['id', 'ASC']]
+  };
+  let rows = await Order.findAll(query);
+  if (rows.length === 0 && legacyOrders.length > 0) {
+    await replaceKitchenOrders(row.id, row.ownerUserId, legacyOrders, { updateKitchenMirror: false });
+    rows = await Order.findAll(query);
+  }
+  return rows.map(toClientOrder);
+}
+
 function asyncHandler(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(next);
@@ -162,6 +275,7 @@ function getKitchenInfoWithId(rawInfo, kitchenId) {
 async function migrateLegacyKitchen(kitchen) {
   if (!kitchen) return null;
   const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const legacyOrders = normalizeOrderList(row.orders);
 
   if (isNumericKitchenId(row.id)) {
     const kitchenInfo = getKitchenInfoWithId(row.kitchenInfo, row.id);
@@ -187,7 +301,9 @@ async function migrateLegacyKitchen(kitchen) {
         orders: row.orders || stringifyJson([], []),
         lastQueueCode: row.lastQueueCode || null
       });
+      await replaceKitchenOrders(existing.id, row.ownerUserId, legacyOrders, { updateKitchenMirror: false });
     }
+    await Order.destroy({ where: { kitchenId: legacyId } });
     await kitchen.destroy();
     return existing;
   }
@@ -204,6 +320,8 @@ async function migrateLegacyKitchen(kitchen) {
       orders: row.orders || stringifyJson([], []),
       lastQueueCode: row.lastQueueCode || null
     });
+    await replaceKitchenOrders(numericId, row.ownerUserId, legacyOrders, { updateKitchenMirror: false });
+    await Order.destroy({ where: { kitchenId: legacyId } });
     await kitchen.destroy();
     return migrated;
   } catch (err) {
@@ -242,6 +360,10 @@ async function migrateLegacyUser(legacyUser, loginKey) {
   });
 
   await Kitchen.update(
+    { ownerUserId: numericId },
+    { where: { ownerUserId: legacyUser.id } }
+  );
+  await Order.update(
     { ownerUserId: numericId },
     { where: { ownerUserId: legacyUser.id } }
   );
@@ -311,6 +433,7 @@ async function findUserByIdOrLoginKey(id) {
 }
 
 function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {}) {
+  const normalizedOrders = normalizeOrderList(state.orders);
   const kitchenInfo = {
     ...(state.kitchenInfo || {}),
     id: kitchenId
@@ -328,7 +451,7 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
     kitchenInfo: stringifyJson(kitchenInfo, {}),
     categories: stringifyJson(Array.isArray(state.categories) ? state.categories : ['未分类'], []),
     dishes: stringifyJson(Array.isArray(state.dishes) ? state.dishes : [], []),
-    orders: stringifyJson(Array.isArray(state.orders) ? state.orders : [], []),
+    orders: stringifyJson(normalizedOrders, []),
     lastQueueCode: state.lastQueueCode || null
   };
 
@@ -336,7 +459,10 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
     payload.legacyId = options.legacyId || null;
   }
 
-  return payload;
+  return {
+    payload,
+    orders: normalizedOrders
+  };
 }
 
 async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
@@ -362,12 +488,18 @@ async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
     ...(localKitchenId && localKitchenId !== kitchenId ? { legacyId: localKitchenId } : {}),
     defaultKitchenName
   };
-  return Kitchen.create(normalizeKitchenState(kitchenId, userId, state, options));
+  const normalizedState = normalizeKitchenState(kitchenId, userId, state, options);
+  const createdKitchen = await Kitchen.create(normalizedState.payload);
+  if (normalizedState.orders.length > 0) {
+    await replaceKitchenOrders(kitchenId, userId, normalizedState.orders, { updateKitchenMirror: false });
+  }
+  return createdKitchen;
 }
 
-function toClientState(kitchen) {
+async function toClientState(kitchen) {
   const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
   const kitchenInfo = parseJson(row.kitchenInfo, { id: row.id, name: makeDefaultKitchenName() });
+  const orders = await loadKitchenOrders(row);
   return {
     kitchenId: row.id,
     ownerUserId: row.ownerUserId,
@@ -377,7 +509,7 @@ function toClientState(kitchen) {
     },
     categories: parseJson(row.categories, []),
     dishes: parseJson(row.dishes, []),
-    orders: parseJson(row.orders, []),
+    orders,
     lastQueueCode: row.lastQueueCode || null,
     updatedAt: row.updatedAt
   };
@@ -403,7 +535,7 @@ app.post('/api/login', asyncHandler(async (req, res) => {
   const body = req.body || {};
   const user = await upsertUser(req, body);
   const kitchen = await ensureDefaultKitchenForUser(user.id, body.localState || {}, user);
-  res.send({ user: toClientUser(user), ...toClientState(kitchen) });
+  res.send({ user: toClientUser(user), ...(await toClientState(kitchen)) });
 }));
 
 app.post('/api/bootstrap', asyncHandler(async (req, res) => {
@@ -424,7 +556,7 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
 
   res.send({
     user: toClientUser(user),
-    ...toClientState(kitchen)
+    ...(await toClientState(kitchen))
   });
 }));
 
@@ -479,7 +611,7 @@ app.get('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
     return;
   }
 
-  res.send(toClientState(kitchen));
+  res.send(await toClientState(kitchen));
 }));
 
 app.post('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
@@ -493,16 +625,17 @@ app.post('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
   const options = !current && requestedKitchenId && requestedKitchenId !== kitchenId
     ? { legacyId: requestedKitchenId }
     : {};
-  const payload = normalizeKitchenState(kitchenId, ownerUserId, body.state || {}, options);
+  const normalizedState = normalizeKitchenState(kitchenId, ownerUserId, body.state || {}, options);
 
   let kitchen = current;
   if (kitchen) {
-    await kitchen.update(payload);
+    await kitchen.update(normalizedState.payload);
   } else {
-    kitchen = await Kitchen.create(payload);
+    kitchen = await Kitchen.create(normalizedState.payload);
   }
+  await replaceKitchenOrders(kitchenId, ownerUserId, normalizedState.orders, { updateKitchenMirror: false });
 
-  res.send(toClientState(kitchen));
+  res.send(await toClientState(kitchen));
 }));
 
 app.use((err, req, res, next) => {
