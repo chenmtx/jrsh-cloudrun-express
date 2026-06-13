@@ -323,6 +323,23 @@ async function loadKitchenOrders(kitchen) {
   return rows.map(toClientOrder);
 }
 
+function toClientKitchenSummary(kitchen) {
+  const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
+  const info = parseJson(row.kitchenInfo, {});
+  return {
+    id: row.id,
+    ownerUserId: row.ownerUserId || '',
+    legacyId: row.legacyId || '',
+    name: info.name || `厨房${row.id}`,
+    logo: info.logo || ''
+  };
+}
+
+async function loadOwnedKitchenOrders(kitchens) {
+  const orderGroups = await Promise.all((kitchens || []).map(kitchen => loadKitchenOrders(kitchen)));
+  return orderGroups.reduce((result, orders) => result.concat(orders), []);
+}
+
 function normalizeDishInteger(value) {
   const parsed = parseInt(value, 10);
   return Number.isNaN(parsed) ? null : parsed;
@@ -447,6 +464,53 @@ async function loadKitchenDishes(kitchen) {
     rows = await Dish.findAll(query);
   }
   return rows.map(toClientDish);
+}
+
+async function restoreOrderInventoryIfNeeded(order) {
+  if (!order || order.status !== 'cancelled' || order.inventoryRestored) return order;
+  const items = Array.isArray(order.items) ? order.items : [];
+  if (!items.length || !order.kitchenId) return order;
+
+  const quantityByDishId = items.reduce((result, item) => {
+    const id = String(item && item.id !== undefined ? item.id : '').trim();
+    if (!id) return result;
+    result[id] = (result[id] || 0) + Number(item.count || 0);
+    return result;
+  }, {});
+
+  const rows = await Dish.findAll({ where: { kitchenId: order.kitchenId } });
+  await Promise.all(rows.map(row => {
+    const currentDish = toClientDish(row);
+    const count = quantityByDishId[String(currentDish.id || '')] || 0;
+    if (!count) return Promise.resolve(null);
+
+    const currentStock = currentDish.stock === undefined || currentDish.stock === null || currentDish.stock === ''
+      ? 999
+      : Number(currentDish.stock);
+    const currentSales = Number(currentDish.sales || 0);
+    const nextDish = {
+      ...currentDish,
+      stock: (Number.isNaN(currentStock) ? 0 : currentStock) + count,
+      sales: Math.max(0, (Number.isNaN(currentSales) ? 0 : currentSales) - count)
+    };
+    const rowData = row.toJSON ? row.toJSON() : row;
+    const nextRow = toDishRow(rowData.kitchenId, rowData.ownerUserId, nextDish, rowData.sortIndex || 0);
+    return row.update({
+      category: nextRow.category,
+      name: nextRow.name,
+      price: nextRow.price,
+      status: nextRow.status,
+      stars: nextRow.stars,
+      stock: nextRow.stock,
+      sales: nextRow.sales,
+      payload: nextRow.payload
+    });
+  }));
+
+  return {
+    ...order,
+    inventoryRestored: true
+  };
 }
 
 function asyncHandler(handler) {
@@ -883,7 +947,11 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
     where: { ownerUserId: user.id },
     order: [['orderedAt', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']]
   });
-  const ownKitchenOrders = await loadKitchenOrders(ownerKitchen);
+  const ownedKitchens = await Kitchen.findAll({
+    where: { ownerUserId: user.id },
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']]
+  });
+  const ownKitchenOrders = await loadOwnedKitchenOrders(ownedKitchens.length ? ownedKitchens : [ownerKitchen]);
 
   res.send({
     user: toClientUser(user),
@@ -891,8 +959,44 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
     isVisitingKitchen: kitchen.id !== ownerKitchen.id,
     userOrders: userOrders.map(toClientOrder),
     ownKitchenOrders,
+    ownedKitchens: (ownedKitchens.length ? ownedKitchens : [ownerKitchen]).map(toClientKitchenSummary),
     ...(await toClientState(kitchen))
   });
+}));
+
+app.post('/api/orders/:id', asyncHandler(async (req, res) => {
+  const orderId = String(req.params.id || '').trim();
+  const body = req.body || {};
+  const incomingOrder = body.order || body;
+  const current = await Order.findOne({ where: { id: orderId } });
+  if (!current) {
+    res.status(404).send({ error: 'Order not found' });
+    return;
+  }
+
+  const row = current.toJSON ? current.toJSON() : current;
+  let payload = {
+    ...parseJson(row.payload, {}),
+    ...incomingOrder,
+    id: orderId,
+    kitchenId: incomingOrder.kitchenId || row.kitchenId
+  };
+  payload = await restoreOrderInventoryIfNeeded(payload);
+  const nextRow = toOrderRow(row.kitchenId, row.ownerUserId, payload);
+  await current.update({
+    kitchenId: nextRow.kitchenId,
+    ownerUserId: nextRow.ownerUserId,
+    status: nextRow.status,
+    queueCode: nextRow.queueCode,
+    total: nextRow.total,
+    time: nextRow.time,
+    timeFull: nextRow.timeFull,
+    userNickname: nextRow.userNickname,
+    orderedAt: nextRow.orderedAt,
+    payload: nextRow.payload
+  });
+  await current.reload();
+  res.send({ order: toClientOrder(current) });
 }));
 
 app.post('/api/users/:id/profile', asyncHandler(async (req, res) => {
@@ -1070,19 +1174,11 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
         updatedAt: row.updatedAt || null
       };
     }),
-    kitchens: kitchens.map(kitchen => {
-      const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
-      const info = parseJson(row.kitchenInfo, {});
-      return {
-        id: row.id,
-        ownerUserId: row.ownerUserId || '',
-        legacyId: row.legacyId || '',
-        name: info.name || `厨房${row.id}`,
-        announcement: info.announcement || '',
-        logo: info.logo || '',
-        updatedAt: row.updatedAt || null
-      };
-    })
+    kitchens: kitchens.map(kitchen => ({
+      ...toClientKitchenSummary(kitchen),
+      announcement: parseJson((kitchen.toJSON ? kitchen.toJSON() : kitchen).kitchenInfo, {}).announcement || '',
+      updatedAt: (kitchen.toJSON ? kitchen.toJSON() : kitchen).updatedAt || null
+    }))
   });
 }));
 
