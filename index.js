@@ -397,6 +397,10 @@ async function upsertUser(req, body = {}) {
   const currentCabbageBalance = current && current.cabbageBalance;
   const incomingCabbageHistory = normalizeCabbageHistory(body.cabbageHistory, incomingCabbageBalance);
   const currentCabbageHistory = current ? parseUserCabbageHistory(current, currentCabbageBalance) : [];
+  const persistedCabbageBalance = current ? formatCabbageNumber(currentCabbageBalance, 2200.00) : incomingCabbageBalance;
+  const persistedCabbageHistory = current
+    ? (currentCabbageHistory.length > 0 ? currentCabbageHistory : makeDefaultCabbageHistory(persistedCabbageBalance))
+    : incomingCabbageHistory;
 
   const next = {
     id: current ? current.id : await makeNumericUserId(),
@@ -404,13 +408,10 @@ async function upsertUser(req, body = {}) {
     nickname,
     avatar: incomingAvatar || currentAvatar || '',
     defaultOrderNote: hasDefaultOrderNote ? incomingDefaultOrderNote : (currentDefaultOrderNote || ''),
-    cabbageBalance: hasCabbageBalance ? incomingCabbageBalance : (current ? currentCabbageBalance : 2200.00),
-    cabbageHistory: stringifyJson(
-      current
-        ? (currentCabbageHistory.length > 0 ? currentCabbageHistory : incomingCabbageHistory)
-        : incomingCabbageHistory,
-      []
-    )
+    // Existing users treat the database as the source of truth for cabbage data.
+    // Login/bootstrap must not overwrite remote balance with local default 2200 after cache clear.
+    cabbageBalance: persistedCabbageBalance,
+    cabbageHistory: stringifyJson(persistedCabbageHistory, [])
   };
 
   if (current) {
