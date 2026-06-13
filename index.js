@@ -894,6 +894,7 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
         legacyId: row.legacyId || '',
         name: info.name || `厨房${row.id}`,
         announcement: info.announcement || '',
+        logo: info.logo || '',
         updatedAt: row.updatedAt || null
       };
     })
