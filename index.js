@@ -260,6 +260,9 @@ function toClientOrder(order) {
   return {
     ...payload,
     id: row.id,
+    kitchenId: payload.kitchenId !== undefined ? payload.kitchenId : row.kitchenId,
+    ownerUserId: payload.ownerUserId !== undefined ? payload.ownerUserId : row.ownerUserId,
+    userId: payload.userId !== undefined ? payload.userId : row.ownerUserId,
     status: payload.status !== undefined ? payload.status : (row.status || ''),
     queueCode: payload.queueCode !== undefined ? payload.queueCode : row.queueCode,
     total: payload.total !== undefined ? payload.total : row.total,
@@ -875,17 +878,19 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
     kitchen = ownerKitchen;
   }
 
-  // 获取用户在所有厨房的订单
+  // 用户订单按下单用户筛选；自己的厨房订单由厨房归属决定。
   const userOrders = await Order.findAll({
     where: { ownerUserId: user.id },
     order: [['orderedAt', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']]
   });
+  const ownKitchenOrders = await loadKitchenOrders(ownerKitchen);
 
   res.send({
     user: toClientUser(user),
     ownerKitchenId: ownerKitchen.id,
     isVisitingKitchen: kitchen.id !== ownerKitchen.id,
     userOrders: userOrders.map(toClientOrder),
+    ownKitchenOrders,
     ...(await toClientState(kitchen))
   });
 }));
