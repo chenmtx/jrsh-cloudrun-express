@@ -615,6 +615,51 @@ app.get('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
   res.send(await toClientState(kitchen));
 }));
 
+app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
+  const users = await User.findAll({
+    attributes: ['id', 'openid', 'nickname', 'avatar', 'defaultOrderNote', 'cabbageBalance', 'updatedAt'],
+    order: [['updatedAt', 'DESC']]
+  });
+  const kitchens = await Kitchen.findAll({
+    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenInfo', 'updatedAt'],
+    order: [['updatedAt', 'DESC']]
+  });
+
+  const kitchenCountByUserId = kitchens.reduce((map, kitchen) => {
+    const ownerUserId = kitchen.ownerUserId || '';
+    map[ownerUserId] = (map[ownerUserId] || 0) + 1;
+    return map;
+  }, {});
+
+  res.send({
+    users: users.map(user => {
+      const row = user.toJSON ? user.toJSON() : user;
+      return {
+        id: row.id,
+        openid: row.openid || '',
+        nickname: row.nickname || '',
+        avatar: row.avatar || '',
+        defaultOrderNote: row.defaultOrderNote || '',
+        cabbageBalance: formatCabbageNumberText(row.cabbageBalance, 2200.00),
+        kitchenCount: kitchenCountByUserId[row.id] || 0,
+        updatedAt: row.updatedAt || null
+      };
+    }),
+    kitchens: kitchens.map(kitchen => {
+      const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+      const info = parseJson(row.kitchenInfo, {});
+      return {
+        id: row.id,
+        ownerUserId: row.ownerUserId || '',
+        legacyId: row.legacyId || '',
+        name: info.name || `厨房${row.id}`,
+        announcement: info.announcement || '',
+        updatedAt: row.updatedAt || null
+      };
+    })
+  });
+}));
+
 app.post('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
   const requestedKitchenId = req.params.id;
   const body = req.body || {};
