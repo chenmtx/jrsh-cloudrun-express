@@ -228,16 +228,20 @@ function normalizeOrderList(orders) {
   }, []);
 }
 
-function toOrderRow(kitchenId, ownerUserId, order) {
+function toOrderRow(kitchenId, kitchenOwnerUserId, order) {
   const normalized = {
     ...order,
     id: String(order.id || makeId('order'))
   };
   const time = typeof normalized.time === 'string' ? normalized.time.trim().slice(0, 32) : '';
   const timeFull = typeof normalized.timeFull === 'string' ? normalized.timeFull.trim().slice(0, 32) : '';
+
+  // ownerUserId 应该是下单用户的ID，不是厨房主人的ID
+  const ownerUserId = normalized.userId || normalized.ownerUserId || kitchenOwnerUserId;
+
   return {
     id: normalized.id,
-    kitchenId,
+    kitchenId: normalized.kitchenId || kitchenId,
     ownerUserId,
     status: typeof normalized.status === 'string' ? normalized.status.slice(0, 32) : '',
     queueCode: normalizeOrderQueueCode(normalized.queueCode),
@@ -268,16 +272,26 @@ function toClientOrder(order) {
 async function replaceKitchenOrders(kitchenId, ownerUserId, orders, options = {}) {
   const normalizedOrders = normalizeOrderList(orders);
   await sequelize.transaction(async transaction => {
-    await Order.destroy({
-      where: { kitchenId },
-      transaction
-    });
+    // 删除本次推送的订单ID（用于更新）
+    const orderIds = normalizedOrders.map(o => o.id);
+    if (orderIds.length > 0) {
+      await Order.destroy({
+        where: {
+          id: { [Op.in]: orderIds }
+        },
+        transaction
+      });
+    }
+
+    // 插入订单
     if (normalizedOrders.length > 0) {
       await Order.bulkCreate(
         normalizedOrders.map(order => toOrderRow(kitchenId, ownerUserId, order)),
         { transaction }
       );
     }
+
+    // 更新Kitchen表的镜像字段（如果需要）
     if (options.updateKitchenMirror) {
       await Kitchen.update(
         { orders: stringifyJson(normalizedOrders, []) },
@@ -861,10 +875,17 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
     kitchen = ownerKitchen;
   }
 
+  // 获取用户在所有厨房的订单
+  const userOrders = await Order.findAll({
+    where: { ownerUserId: user.id },
+    order: [['orderedAt', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']]
+  });
+
   res.send({
     user: toClientUser(user),
     ownerKitchenId: ownerKitchen.id,
     isVisitingKitchen: kitchen.id !== ownerKitchen.id,
+    userOrders: userOrders.map(toClientOrder),
     ...(await toClientState(kitchen))
   });
 }));
