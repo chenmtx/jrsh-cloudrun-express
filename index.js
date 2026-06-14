@@ -133,10 +133,10 @@ function makeDefaultCabbageHistory(balance = 2200.00) {
   ];
 }
 
-function normalizeCabbageHistory(history, balance = 2200.00) {
+function normalizeCabbageHistory(history, balance = 2200.00, options = {}) {
   const source = Array.isArray(history) ? history : parseJson(history, []);
   if (!Array.isArray(source) || source.length === 0) {
-    return makeDefaultCabbageHistory(balance);
+    return options.keepEmpty ? [] : makeDefaultCabbageHistory(balance);
   }
 
   const normalized = source.reduce((result, item) => {
@@ -153,12 +153,19 @@ function normalizeCabbageHistory(history, balance = 2200.00) {
     return result;
   }, []);
 
-  return normalized.length > 0 ? normalized : makeDefaultCabbageHistory(balance);
+  return normalized.length > 0 ? normalized : (options.keepEmpty ? [] : makeDefaultCabbageHistory(balance));
 }
 
 function parseUserCabbageHistory(user, fallbackBalance = 2200.00) {
   if (!user) return makeDefaultCabbageHistory(fallbackBalance);
-  return normalizeCabbageHistory(user.cabbageHistory, user.cabbageBalance !== undefined ? user.cabbageBalance : fallbackBalance);
+  const hasStoredHistory = user.cabbageHistory !== undefined
+    && user.cabbageHistory !== null
+    && String(user.cabbageHistory).trim() !== '';
+  return normalizeCabbageHistory(
+    user.cabbageHistory,
+    user.cabbageBalance !== undefined ? user.cabbageBalance : fallbackBalance,
+    { keepEmpty: hasStoredHistory }
+  );
 }
 
 function toClientUser(user) {
@@ -1109,7 +1116,7 @@ app.post('/api/users/:id/cabbage', asyncHandler(async (req, res) => {
     ? formatCabbageNumber(body.balance, currentBalance)
     : currentBalance;
   const nextHistory = Object.prototype.hasOwnProperty.call(body, 'history')
-    ? normalizeCabbageHistory(body.history, nextBalance)
+    ? normalizeCabbageHistory(body.history, nextBalance, { keepEmpty: true })
     : parseUserCabbageHistory(row, nextBalance);
 
   await user.update({
