@@ -29,6 +29,73 @@ function stringifyJson(value, fallback) {
   return JSON.stringify(value === undefined ? fallback : value);
 }
 
+const DEFAULT_KITCHEN_DISPLAY_SETTINGS = {
+  reviews: true,
+  stock: false,
+  sales: false,
+  desc: true,
+  stars: true,
+  ingredients: true,
+  steps: true,
+  nutrition: true,
+  cooking: true
+};
+
+function normalizeBoolean(value, fallback) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase();
+    if (text === 'false' || text === '0' || text === 'off') return false;
+    if (text === 'true' || text === '1' || text === 'on') return true;
+  }
+  return !!value;
+}
+
+function normalizeBusinessTime(value, fallback) {
+  const text = String(value || '').trim();
+  if (!/^\d{1,2}:\d{2}$/.test(text)) return fallback;
+  const parts = text.split(':');
+  const hour = parseInt(parts[0], 10);
+  const minute = parseInt(parts[1], 10);
+  if (Number.isNaN(hour) || Number.isNaN(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
+  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+}
+
+function normalizeKitchenDisplaySettings(settings) {
+  const source = typeof settings === 'string' ? parseJson(settings, {}) : (settings || {});
+  return Object.keys(DEFAULT_KITCHEN_DISPLAY_SETTINGS).reduce((result, key) => {
+    result[key] = normalizeBoolean(source[key], DEFAULT_KITCHEN_DISPLAY_SETTINGS[key]);
+    return result;
+  }, {});
+}
+
+function normalizeKitchenInfo(kitchenId, rawInfo = {}, row = {}) {
+  const info = rawInfo && typeof rawInfo === 'object' ? rawInfo : {};
+  const displaySettings = normalizeKitchenDisplaySettings(
+    info.displaySettings !== undefined ? info.displaySettings : row.displaySettings
+  );
+  const album = Array.isArray(info.album)
+    ? info.album.filter(image => typeof image === 'string' && image.trim()).slice(0, 4)
+    : [];
+
+  const normalized = {
+    ...info,
+    id: kitchenId,
+    announcement: String(info.announcement !== undefined ? info.announcement : '欢迎光临本小店，祝您用餐愉快！').slice(0, 300),
+    album,
+    contact: String(info.contact || '').slice(0, 200),
+    address: String(info.address || '').slice(0, 300),
+    isPublic: normalizeBoolean(info.isPublic !== undefined ? info.isPublic : row.isPublic, false),
+    businessOpen: normalizeBoolean(info.businessOpen !== undefined ? info.businessOpen : row.businessOpen, true),
+    businessStart: normalizeBusinessTime(info.businessStart !== undefined ? info.businessStart : row.businessStart, '00:00'),
+    businessEnd: normalizeBusinessTime(info.businessEnd !== undefined ? info.businessEnd : row.businessEnd, '23:59'),
+    displaySettings
+  };
+
+  if (normalized.logo === undefined) normalized.logo = '';
+  return normalized;
+}
+
 function formatCabbageNumber(value, fallback = 2200.00) {
   const parsed = parseFloat(value);
   if (Number.isNaN(parsed)) {
@@ -325,13 +392,18 @@ async function loadKitchenOrders(kitchen) {
 
 function toClientKitchenSummary(kitchen) {
   const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
-  const info = parseJson(row.kitchenInfo, {});
+  const info = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
   return {
     id: row.id,
     ownerUserId: row.ownerUserId || '',
     legacyId: row.legacyId || '',
     name: info.name || `厨房${row.id}`,
-    logo: info.logo || ''
+    logo: info.logo || '',
+    isPublic: !!info.isPublic,
+    businessOpen: !!info.businessOpen,
+    businessStart: info.businessStart,
+    businessEnd: info.businessEnd,
+    displaySettings: info.displaySettings
   };
 }
 
@@ -807,16 +879,11 @@ async function findUserByIdOrLoginKey(id) {
 function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {}) {
   const normalizedOrders = normalizeOrderList(state.orders);
   const normalizedDishes = normalizeDishList(state.dishes);
-  const kitchenInfo = {
-    ...(state.kitchenInfo || {}),
-    id: kitchenId
-  };
+  const kitchenInfo = normalizeKitchenInfo(kitchenId, state.kitchenInfo || {});
 
   if (isLegacyDefaultKitchenName(kitchenInfo.name)) {
     kitchenInfo.name = options.defaultKitchenName || makeDefaultKitchenName();
   }
-  if (kitchenInfo.announcement === undefined) kitchenInfo.announcement = '欢迎光临本小店，祝您用餐愉快！';
-  if (kitchenInfo.logo === undefined) kitchenInfo.logo = '';
 
   const payload = {
     id: kitchenId,
@@ -825,7 +892,12 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
     categories: stringifyJson(Array.isArray(state.categories) ? state.categories : ['未分类'], []),
     dishes: stringifyJson(normalizedDishes, []),
     orders: stringifyJson(normalizedOrders, []),
-    lastQueueCode: state.lastQueueCode || null
+    lastQueueCode: state.lastQueueCode || null,
+    isPublic: !!kitchenInfo.isPublic,
+    businessOpen: !!kitchenInfo.businessOpen,
+    businessStart: kitchenInfo.businessStart,
+    businessEnd: kitchenInfo.businessEnd,
+    displaySettings: stringifyJson(kitchenInfo.displaySettings, {})
   };
 
   if (Object.prototype.hasOwnProperty.call(options, 'legacyId')) {
@@ -875,16 +947,17 @@ async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
 
 async function toClientState(kitchen) {
   const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
-  const kitchenInfo = parseJson(row.kitchenInfo, { id: row.id, name: makeDefaultKitchenName() });
+  const kitchenInfo = normalizeKitchenInfo(
+    row.id,
+    parseJson(row.kitchenInfo, { id: row.id, name: makeDefaultKitchenName() }),
+    row
+  );
   const orders = await loadKitchenOrders(row);
   const dishes = await loadKitchenDishes(row);
   return {
     kitchenId: row.id,
     ownerUserId: row.ownerUserId,
-    kitchenInfo: {
-      ...kitchenInfo,
-      id: row.id
-    },
+    kitchenInfo,
     categories: parseJson(row.categories, []),
     dishes,
     orders,

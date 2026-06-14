@@ -92,6 +92,30 @@ const Kitchen = sequelize.define('JrshKitchen', {
   lastQueueCode: {
     type: DataTypes.INTEGER,
     allowNull: true
+  },
+  isPublic: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: false
+  },
+  businessOpen: {
+    type: DataTypes.BOOLEAN,
+    allowNull: false,
+    defaultValue: true
+  },
+  businessStart: {
+    type: DataTypes.STRING(8),
+    allowNull: false,
+    defaultValue: '00:00'
+  },
+  businessEnd: {
+    type: DataTypes.STRING(8),
+    allowNull: false,
+    defaultValue: '23:59'
+  },
+  displaySettings: {
+    type: DataTypes.TEXT('long'),
+    allowNull: true
   }
 });
 
