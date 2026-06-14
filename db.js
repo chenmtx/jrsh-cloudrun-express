@@ -13,9 +13,14 @@ const sequelize = new Sequelize(MYSQL_DATABASE, MYSQL_USERNAME, MYSQL_PASSWORD, 
   host,
   port,
   dialect: 'mysql',
+  dialectOptions: {
+    charset: 'utf8mb4'
+  },
   logging: false,
   define: {
-    freezeTableName: true
+    freezeTableName: true,
+    charset: 'utf8mb4',
+    collate: 'utf8mb4_unicode_ci'
   }
 });
 
@@ -193,12 +198,34 @@ const Dish = sequelize.define('JrshDish', {
   }
 });
 
+function quoteIdentifier(value) {
+  return `\`${String(value || '').replace(/`/g, '``')}\``;
+}
+
+async function ensureUtf8mb4() {
+  const tables = ['JrshUser', 'JrshKitchen', 'JrshOrder', 'JrshDish'];
+  try {
+    await sequelize.query(`ALTER DATABASE ${quoteIdentifier(MYSQL_DATABASE)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+  } catch (err) {
+    console.warn('ensure database utf8mb4 failed', err && err.message ? err.message : err);
+  }
+
+  for (const table of tables) {
+    try {
+      await sequelize.query(`ALTER TABLE ${quoteIdentifier(table)} CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
+    } catch (err) {
+      console.warn(`ensure table ${table} utf8mb4 failed`, err && err.message ? err.message : err);
+    }
+  }
+}
+
 async function init() {
   await sequelize.authenticate();
   await User.sync({ alter: true });
   await Kitchen.sync({ alter: true });
   await Dish.sync({ alter: true });
   await Order.sync({ alter: true });
+  await ensureUtf8mb4();
 }
 
 module.exports = {
