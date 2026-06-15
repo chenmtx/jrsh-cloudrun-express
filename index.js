@@ -414,11 +414,13 @@ async function getKitchenDishCount(row) {
 async function toClientKitchenSummary(kitchen) {
   const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
   const info = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
+  const kitchenCode = await ensureKitchenCode(kitchen);
   const createdAt = row.createdAt || null;
   return {
     id: row.id,
     ownerUserId: row.ownerUserId || '',
     legacyId: row.legacyId || '',
+    kitchenCode,
     name: info.name || `厨房${row.id}`,
     logo: info.logo || '',
     dishCount: await getKitchenDishCount(row),
@@ -667,10 +669,48 @@ function isNumericKitchenId(id) {
 async function makeNumericKitchenId() {
   for (let i = 0; i < 30; i += 1) {
     const id = String(Math.floor(10000000 + Math.random() * 90000000));
-    const existing = await Kitchen.findByPk(id) || await Kitchen.findOne({ where: { legacyId: id } });
+    const existing = await Kitchen.findByPk(id)
+      || await Kitchen.findOne({ where: { legacyId: id } })
+      || await Kitchen.findOne({ where: { kitchenCode: id } });
     if (!existing) return id;
   }
   return String(Date.now()).slice(-8);
+}
+
+function isKitchenCode(value) {
+  return /^\d{6}$/.test(String(value || '').trim());
+}
+
+async function isKitchenCodeAvailable(code, currentKitchenId = '', allowedKitchenIds = []) {
+  if (!isKitchenCode(code)) return false;
+  const allowedIds = new Set(
+    [currentKitchenId].concat(allowedKitchenIds)
+      .map(id => String(id || ''))
+      .filter(Boolean)
+  );
+  const matches = await Promise.all([
+    Kitchen.findOne({ where: { kitchenCode: code } }),
+    Kitchen.findByPk(code),
+    Kitchen.findOne({ where: { legacyId: code } })
+  ]);
+  return matches.every(kitchen => !kitchen || allowedIds.has(String(kitchen.id || '')));
+}
+
+async function makeKitchenCode(preferredCode = '', currentKitchenId = '', allowedKitchenIds = []) {
+  const preferred = String(preferredCode || '').trim();
+  if (await isKitchenCodeAvailable(preferred, currentKitchenId, allowedKitchenIds)) return preferred;
+
+  for (let i = 0; i < 80; i += 1) {
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    if (await isKitchenCodeAvailable(code, currentKitchenId, allowedKitchenIds)) return code;
+  }
+
+  for (let i = 0; i < 80; i += 1) {
+    const code = String(Date.now() + i).slice(-6);
+    if (await isKitchenCodeAvailable(code, currentKitchenId, allowedKitchenIds)) return code;
+  }
+
+  throw new Error('Unable to allocate kitchen code');
 }
 
 function getKitchenInfoWithId(rawInfo, kitchenId) {
@@ -680,6 +720,38 @@ function getKitchenInfoWithId(rawInfo, kitchenId) {
   };
 }
 
+async function ensureKitchenCode(kitchen, allowedKitchenIds = []) {
+  if (!kitchen) return '';
+  const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const rawInfo = parseJson(row.kitchenInfo, {});
+  const preferred = isKitchenCode(row.kitchenCode)
+    ? row.kitchenCode
+    : (isKitchenCode(row.legacyId)
+        ? row.legacyId
+        : (isKitchenCode(rawInfo.kitchenCode) ? rawInfo.kitchenCode : (isKitchenCode(row.id) ? row.id : '')));
+  const kitchenCode = await makeKitchenCode(preferred, row.id, allowedKitchenIds);
+  const nextInfo = {
+    ...rawInfo,
+    id: row.id,
+    legacyId: row.legacyId || '',
+    kitchenCode
+  };
+  const updates = {};
+
+  if (row.kitchenCode !== kitchenCode) {
+    updates.kitchenCode = kitchenCode;
+  }
+  if (rawInfo.id !== row.id || rawInfo.legacyId !== nextInfo.legacyId || rawInfo.kitchenCode !== kitchenCode) {
+    updates.kitchenInfo = stringifyJson(nextInfo, {});
+  }
+
+  if (Object.keys(updates).length > 0 && kitchen.update) {
+    await kitchen.update(updates);
+  }
+
+  return kitchenCode;
+}
+
 async function migrateLegacyKitchen(kitchen) {
   if (!kitchen) return null;
   const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
@@ -687,8 +759,12 @@ async function migrateLegacyKitchen(kitchen) {
   const legacyDishes = normalizeDishList(row.dishes);
 
   if (isNumericKitchenId(row.id)) {
+    const kitchenCode = await ensureKitchenCode(kitchen);
     const kitchenInfo = getKitchenInfoWithId(row.kitchenInfo, row.id);
-    if (parseJson(row.kitchenInfo, {}).id !== row.id) {
+    kitchenInfo.legacyId = row.legacyId || '';
+    kitchenInfo.kitchenCode = kitchenCode;
+    const rawInfo = parseJson(row.kitchenInfo, {});
+    if (rawInfo.id !== row.id || rawInfo.legacyId !== kitchenInfo.legacyId || rawInfo.kitchenCode !== kitchenCode) {
       await kitchen.update({
         kitchenInfo: stringifyJson(kitchenInfo, {})
       });
@@ -704,15 +780,21 @@ async function migrateLegacyKitchen(kitchen) {
     if (legacyTime > existingTime) {
       await existing.update({
         ownerUserId: row.ownerUserId,
-        kitchenInfo: stringifyJson(getKitchenInfoWithId(row.kitchenInfo, existing.id), {}),
+        kitchenInfo: stringifyJson({
+          ...getKitchenInfoWithId(row.kitchenInfo, existing.id),
+          legacyId: existing.legacyId || legacyId,
+          kitchenCode: existing.kitchenCode || (isKitchenCode(legacyId) ? legacyId : '')
+        }, {}),
         categories: row.categories || stringifyJson(['未分类'], []),
         dishes: row.dishes || stringifyJson([], []),
         orders: row.orders || stringifyJson([], []),
         lastQueueCode: row.lastQueueCode || null
       });
+      await ensureKitchenCode(existing, [legacyId]);
       await replaceKitchenOrders(existing.id, row.ownerUserId, legacyOrders, { updateKitchenMirror: false });
       await replaceKitchenDishes(existing.id, row.ownerUserId, legacyDishes, { updateKitchenMirror: false });
     }
+    await ensureKitchenCode(existing, [legacyId]);
     await Order.destroy({ where: { kitchenId: legacyId } });
     await Dish.destroy({ where: { kitchenId: legacyId } });
     await kitchen.destroy();
@@ -720,12 +802,18 @@ async function migrateLegacyKitchen(kitchen) {
   }
 
   const numericId = await makeNumericKitchenId();
+  const kitchenCode = await makeKitchenCode(legacyId, numericId, [legacyId]);
   try {
     const migrated = await Kitchen.create({
       id: numericId,
       legacyId,
+      kitchenCode,
       ownerUserId: row.ownerUserId,
-      kitchenInfo: stringifyJson(getKitchenInfoWithId(row.kitchenInfo, numericId), {}),
+      kitchenInfo: stringifyJson({
+        ...getKitchenInfoWithId(row.kitchenInfo, numericId),
+        legacyId,
+        kitchenCode
+      }, {}),
       categories: row.categories || stringifyJson(['未分类'], []),
       dishes: row.dishes || stringifyJson([], []),
       orders: row.orders || stringifyJson([], []),
@@ -750,6 +838,9 @@ async function findKitchenByIdOrLegacy(kitchenId) {
 
   const current = await Kitchen.findByPk(id);
   if (current) return migrateLegacyKitchen(current);
+
+  const byKitchenCode = await Kitchen.findOne({ where: { kitchenCode: id } });
+  if (byKitchenCode) return migrateLegacyKitchen(byKitchenCode);
 
   const legacy = await Kitchen.findOne({ where: { legacyId: id } });
   if (legacy) return migrateLegacyKitchen(legacy);
@@ -911,9 +1002,19 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
     kitchenInfo.name = options.defaultKitchenName || makeDefaultKitchenName();
   }
 
+  const kitchenCode = isKitchenCode(options.kitchenCode)
+    ? options.kitchenCode
+    : (isKitchenCode(state.kitchenCode)
+        ? state.kitchenCode
+        : (isKitchenCode(kitchenInfo.kitchenCode) ? kitchenInfo.kitchenCode : ''));
+  if (kitchenCode) {
+    kitchenInfo.kitchenCode = kitchenCode;
+  }
+
   const payload = {
     id: kitchenId,
     ownerUserId,
+    kitchenCode: kitchenCode || null,
     kitchenInfo: stringifyJson(kitchenInfo, {}),
     categories: stringifyJson(Array.isArray(state.categories) ? state.categories : ['未分类'], []),
     dishes: stringifyJson(normalizedDishes, []),
@@ -945,8 +1046,11 @@ async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
   });
   kitchen = await migrateLegacyKitchen(kitchen);
   if (kitchen) {
+    const kitchenCode = await ensureKitchenCode(kitchen);
     const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
     const kitchenInfo = getKitchenInfoWithId(row.kitchenInfo, row.id);
+    kitchenInfo.legacyId = row.legacyId || '';
+    kitchenInfo.kitchenCode = kitchenCode;
     if (isLegacyDefaultKitchenName(kitchenInfo.name)) {
       kitchenInfo.name = defaultKitchenName;
       await kitchen.update({ kitchenInfo: stringifyJson(kitchenInfo, {}) });
@@ -956,8 +1060,15 @@ async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
 
   const localKitchenId = state.kitchenInfo && state.kitchenInfo.id;
   const kitchenId = isNumericKitchenId(localKitchenId) ? localKitchenId : await makeNumericKitchenId();
+  const kitchenCode = await makeKitchenCode(
+    isKitchenCode(localKitchenId)
+      ? localKitchenId
+      : ((state.kitchenInfo && state.kitchenInfo.kitchenCode) || state.kitchenCode || ''),
+    kitchenId
+  );
   const options = {
     ...(localKitchenId && localKitchenId !== kitchenId ? { legacyId: localKitchenId } : {}),
+    kitchenCode,
     defaultKitchenName
   };
   const normalizedState = normalizeKitchenState(kitchenId, userId, state, options);
@@ -973,6 +1084,7 @@ async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
 
 async function toClientState(kitchen) {
   const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const kitchenCode = await ensureKitchenCode(kitchen);
   const kitchenInfo = normalizeKitchenInfo(
     row.id,
     parseJson(row.kitchenInfo, { id: row.id, name: makeDefaultKitchenName() }),
@@ -980,10 +1092,17 @@ async function toClientState(kitchen) {
   );
   const orders = await loadKitchenOrders(row);
   const dishes = await loadKitchenDishes(row);
+  const legacyId = row.legacyId || '';
   return {
     kitchenId: row.id,
     ownerUserId: row.ownerUserId,
-    kitchenInfo,
+    legacyId,
+    kitchenCode,
+    kitchenInfo: {
+      ...kitchenInfo,
+      legacyId,
+      kitchenCode
+    },
     categories: parseJson(row.categories, []),
     dishes,
     orders,
@@ -1251,7 +1370,7 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
     order: [['updatedAt', 'DESC']]
   });
   const kitchens = await Kitchen.findAll({
-    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenInfo', 'dishes', 'createdAt', 'updatedAt'],
+    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenCode', 'kitchenInfo', 'dishes', 'createdAt', 'updatedAt'],
     order: [['updatedAt', 'DESC']]
   });
 
@@ -1301,9 +1420,13 @@ app.post('/api/kitchens/:id/catalog', asyncHandler(async (req, res) => {
       categories: stringifyJson(categories, [])
     });
   } else {
+    const kitchenCode = await makeKitchenCode(
+      isKitchenCode(requestedKitchenId) ? requestedKitchenId : '',
+      kitchenId
+    );
     const options = requestedKitchenId && requestedKitchenId !== kitchenId
-      ? { legacyId: requestedKitchenId }
-      : {};
+      ? { legacyId: requestedKitchenId, kitchenCode }
+      : { kitchenCode };
     const normalizedState = normalizeKitchenState(kitchenId, ownerUserId, {
       kitchenInfo: {
         id: kitchenId,
@@ -1333,9 +1456,17 @@ app.post('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
     ? current.id
     : (isNumericKitchenId(requestedKitchenId) ? requestedKitchenId : await makeNumericKitchenId());
   const ownerUserId = current ? current.ownerUserId : (body.userId || getRequestUserId(req, body));
+  const kitchenCode = current
+    ? await ensureKitchenCode(current)
+    : await makeKitchenCode(
+        isKitchenCode(requestedKitchenId)
+          ? requestedKitchenId
+          : (((body.state || {}).kitchenInfo && (body.state || {}).kitchenInfo.kitchenCode) || (body.state || {}).kitchenCode || ''),
+        kitchenId
+      );
   const options = !current && requestedKitchenId && requestedKitchenId !== kitchenId
-    ? { legacyId: requestedKitchenId }
-    : {};
+    ? { legacyId: requestedKitchenId, kitchenCode }
+    : { kitchenCode };
   const normalizedState = normalizeKitchenState(kitchenId, ownerUserId, body.state || {}, options);
 
   let kitchen = current;

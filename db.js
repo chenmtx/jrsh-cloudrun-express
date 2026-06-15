@@ -69,6 +69,11 @@ const Kitchen = sequelize.define('JrshKitchen', {
     allowNull: true,
     unique: true
   },
+  kitchenCode: {
+    type: DataTypes.STRING(6),
+    allowNull: true,
+    unique: true
+  },
   ownerUserId: {
     type: DataTypes.STRING(128),
     allowNull: false
