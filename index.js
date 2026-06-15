@@ -397,20 +397,39 @@ async function loadKitchenOrders(kitchen) {
   return rows.map(toClientOrder);
 }
 
-function toClientKitchenSummary(kitchen) {
+function calculateBusinessDays(value) {
+  const startTime = new Date(value || '').getTime();
+  if (!Number.isFinite(startTime)) return 0;
+  const elapsedMs = Date.now() - startTime;
+  if (elapsedMs < 0) return 1;
+  return Math.max(1, Math.floor(elapsedMs / 86400000) + 1);
+}
+
+async function getKitchenDishCount(row) {
+  const dishCount = await Dish.count({ where: { kitchenId: row.id } });
+  if (dishCount > 0) return dishCount;
+  return normalizeDishList(row.dishes).length;
+}
+
+async function toClientKitchenSummary(kitchen) {
   const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
   const info = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
+  const createdAt = row.createdAt || null;
   return {
     id: row.id,
     ownerUserId: row.ownerUserId || '',
     legacyId: row.legacyId || '',
     name: info.name || `厨房${row.id}`,
     logo: info.logo || '',
+    dishCount: await getKitchenDishCount(row),
+    businessDays: calculateBusinessDays(createdAt),
     isPublic: !!info.isPublic,
     businessOpen: !!info.businessOpen,
     businessStart: info.businessStart,
     businessEnd: info.businessEnd,
-    displaySettings: info.displaySettings
+    displaySettings: info.displaySettings,
+    createdAt,
+    updatedAt: row.updatedAt || null
   };
 }
 
@@ -1031,7 +1050,9 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
     where: { ownerUserId: user.id },
     order: [['updatedAt', 'DESC'], ['id', 'DESC']]
   });
-  const ownKitchenOrders = await loadOwnedKitchenOrders(ownedKitchens.length ? ownedKitchens : [ownerKitchen]);
+  const effectiveOwnedKitchens = ownedKitchens.length ? ownedKitchens : [ownerKitchen];
+  const ownKitchenOrders = await loadOwnedKitchenOrders(effectiveOwnedKitchens);
+  const ownedKitchenSummaries = await Promise.all(effectiveOwnedKitchens.map(toClientKitchenSummary));
 
   res.send({
     user: toClientUser(user),
@@ -1039,7 +1060,7 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
     isVisitingKitchen: kitchen.id !== ownerKitchen.id,
     userOrders: userOrders.map(toClientOrder),
     ownKitchenOrders,
-    ownedKitchens: (ownedKitchens.length ? ownedKitchens : [ownerKitchen]).map(toClientKitchenSummary),
+    ownedKitchens: ownedKitchenSummaries,
     ...(await toClientState(kitchen))
   });
 }));
@@ -1230,7 +1251,7 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
     order: [['updatedAt', 'DESC']]
   });
   const kitchens = await Kitchen.findAll({
-    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenInfo', 'updatedAt'],
+    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenInfo', 'dishes', 'createdAt', 'updatedAt'],
     order: [['updatedAt', 'DESC']]
   });
 
@@ -1239,6 +1260,12 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
     map[ownerUserId] = (map[ownerUserId] || 0) + 1;
     return map;
   }, {});
+
+  const kitchenRows = await Promise.all(kitchens.map(async kitchen => ({
+    ...(await toClientKitchenSummary(kitchen)),
+    announcement: parseJson((kitchen.toJSON ? kitchen.toJSON() : kitchen).kitchenInfo, {}).announcement || '',
+    updatedAt: (kitchen.toJSON ? kitchen.toJSON() : kitchen).updatedAt || null
+  })));
 
   res.send({
     users: users.map(user => {
@@ -1254,11 +1281,7 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
         updatedAt: row.updatedAt || null
       };
     }),
-    kitchens: kitchens.map(kitchen => ({
-      ...toClientKitchenSummary(kitchen),
-      announcement: parseJson((kitchen.toJSON ? kitchen.toJSON() : kitchen).kitchenInfo, {}).announcement || '',
-      updatedAt: (kitchen.toJSON ? kitchen.toJSON() : kitchen).updatedAt || null
-    }))
+    kitchens: kitchenRows
   });
 }));
 
