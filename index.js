@@ -836,13 +836,13 @@ async function findKitchenByIdOrLegacy(kitchenId) {
   const id = String(kitchenId || '').trim();
   if (!id) return null;
 
-  const current = await Kitchen.findByPk(id);
+  const current = await Kitchen.findOne({ where: { id, dissolvedAt: null } });
   if (current) return migrateLegacyKitchen(current);
 
-  const byKitchenCode = await Kitchen.findOne({ where: { kitchenCode: id } });
+  const byKitchenCode = await Kitchen.findOne({ where: { kitchenCode: id, dissolvedAt: null } });
   if (byKitchenCode) return migrateLegacyKitchen(byKitchenCode);
 
-  const legacy = await Kitchen.findOne({ where: { legacyId: id } });
+  const legacy = await Kitchen.findOne({ where: { legacyId: id, dissolvedAt: null } });
   if (legacy) return migrateLegacyKitchen(legacy);
 
   return null;
@@ -1166,7 +1166,7 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
     order: [['orderedAt', 'DESC'], ['createdAt', 'DESC'], ['id', 'DESC']]
   });
   const ownedKitchens = await Kitchen.findAll({
-    where: { ownerUserId: user.id },
+    where: { ownerUserId: user.id, dissolvedAt: null },
     order: [['updatedAt', 'DESC'], ['id', 'DESC']]
   });
   const effectiveOwnedKitchens = ownedKitchens.length ? ownedKitchens : [ownerKitchen];
@@ -1479,6 +1479,61 @@ app.post('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
   await replaceKitchenDishes(kitchenId, ownerUserId, normalizedState.dishes, { updateKitchenMirror: false });
 
   res.send(await toClientState(kitchen));
+}));
+
+app.delete('/api/kitchens/:id', asyncHandler(async (req, res) => {
+  const requestedKitchenId = String(req.params.id || '').trim();
+  const body = req.body || {};
+  if (!requestedKitchenId) {
+    res.status(400).send({ ok: false, error: 'Invalid kitchenId', message: '厨房 ID 不能为空' });
+    return;
+  }
+
+  // 软删除需要能查到包括已解散的厨房，这里不能用过滤了 dissolvedAt 的 findKitchenByIdOrLegacy。
+  let kitchen = await Kitchen.findByPk(requestedKitchenId);
+  if (!kitchen) {
+    kitchen = await Kitchen.findOne({ where: { kitchenCode: requestedKitchenId } });
+  }
+  if (!kitchen) {
+    kitchen = await Kitchen.findOne({ where: { legacyId: requestedKitchenId } });
+  }
+  if (!kitchen) {
+    res.status(404).send({ ok: false, error: 'Kitchen not found', message: '厨房不存在或已解散' });
+    return;
+  }
+
+  // 权限校验：只能解散自己拥有的厨房。
+  const operatorUserId = body.userId || getRequestUserId(req, body);
+  if (!operatorUserId || String(kitchen.ownerUserId) !== String(operatorUserId)) {
+    res.status(403).send({ ok: false, error: 'Forbidden', message: '只能解散自己的厨房' });
+    return;
+  }
+
+  // 幂等：已经软删除过就直接返回成功。
+  if (kitchen.dissolvedAt) {
+    res.send({
+      ok: true,
+      kitchenId: kitchen.id,
+      dissolvedAt: kitchen.dissolvedAt,
+      alreadyDissolved: true
+    });
+    return;
+  }
+
+  const now = new Date();
+  await kitchen.update({ dissolvedAt: now });
+
+  // 软删除同步标记到 kitchenInfo，方便前端和历史快照识别。
+  try {
+    const info = parseJson(kitchen.kitchenInfo, {});
+    info.dissolvedAt = now;
+    info.dissolved = true;
+    await kitchen.update({ kitchenInfo: stringifyJson(info, kitchen.kitchenInfo) });
+  } catch (err) {
+    console.warn('解散厨房时回写 kitchenInfo 失败', err && err.message ? err.message : err);
+  }
+
+  res.send({ ok: true, kitchenId: kitchen.id, dissolvedAt: now });
 }));
 
 app.use((err, req, res, next) => {
