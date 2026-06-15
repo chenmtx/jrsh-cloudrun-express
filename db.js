@@ -121,6 +121,11 @@ const Kitchen = sequelize.define('JrshKitchen', {
   displaySettings: {
     type: DataTypes.TEXT('long'),
     allowNull: true
+  },
+  dissolvedAt: {
+    type: DataTypes.DATE,
+    allowNull: true,
+    defaultValue: null
   }
 });
 
