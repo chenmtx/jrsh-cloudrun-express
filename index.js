@@ -1536,6 +1536,79 @@ app.delete('/api/kitchens/:id', asyncHandler(async (req, res) => {
   res.send({ ok: true, kitchenId: kitchen.id, dissolvedAt: now });
 }));
 
+app.get('/api/users/:id/dissolved-kitchens', asyncHandler(async (req, res) => {
+  const userId = String(req.params.id || '').trim();
+  const operatorUserId = getRequestUserId(req, {});
+  if (!userId || String(userId) !== String(operatorUserId)) {
+    res.status(403).send({ ok: false, error: 'Forbidden', message: '只能查看自己的已解散厨房' });
+    return;
+  }
+
+  const kitchens = await Kitchen.findAll({
+    where: { ownerUserId: userId, dissolvedAt: { [require('sequelize').Op.ne]: null } },
+    order: [['dissolvedAt', 'DESC'], ['updatedAt', 'DESC'], ['id', 'DESC']]
+  });
+
+  const list = await Promise.all(kitchens.map(async kitchen => {
+    const summary = await toClientKitchenSummary(kitchen);
+    const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+    return {
+      ...summary,
+      dissolvedAt: row.dissolvedAt
+    };
+  }));
+
+  res.send({ userId, kitchens: list });
+}));
+
+app.post('/api/kitchens/:id/restore', asyncHandler(async (req, res) => {
+  const requestedKitchenId = String(req.params.id || '').trim();
+  const body = req.body || {};
+  if (!requestedKitchenId) {
+    res.status(400).send({ ok: false, error: 'Invalid kitchenId', message: '厨房 ID 不能为空' });
+    return;
+  }
+
+  // 恢复需要查到已解散的厨房，不能用过滤了 dissolvedAt 的 findKitchenByIdOrLegacy。
+  let kitchen = await Kitchen.findByPk(requestedKitchenId);
+  if (!kitchen) {
+    kitchen = await Kitchen.findOne({ where: { kitchenCode: requestedKitchenId } });
+  }
+  if (!kitchen) {
+    kitchen = await Kitchen.findOne({ where: { legacyId: requestedKitchenId } });
+  }
+  if (!kitchen) {
+    res.status(404).send({ ok: false, error: 'Kitchen not found', message: '厨房不存在' });
+    return;
+  }
+
+  const operatorUserId = body.userId || getRequestUserId(req, body);
+  if (!operatorUserId || String(kitchen.ownerUserId) !== String(operatorUserId)) {
+    res.status(403).send({ ok: false, error: 'Forbidden', message: '只能恢复自己的厨房' });
+    return;
+  }
+
+  // 幂等：未软删除直接返回成功。
+  if (!kitchen.dissolvedAt) {
+    res.send({ ok: true, kitchenId: kitchen.id, alreadyActive: true });
+    return;
+  }
+
+  await kitchen.update({ dissolvedAt: null });
+
+  try {
+    const info = parseJson(kitchen.kitchenInfo, {});
+    delete info.dissolvedAt;
+    delete info.dissolved;
+    await kitchen.update({ kitchenInfo: stringifyJson(info, kitchen.kitchenInfo) });
+  } catch (err) {
+    console.warn('恢复厨房时回写 kitchenInfo 失败', err && err.message ? err.message : err);
+  }
+
+  const summary = await toClientKitchenSummary(kitchen);
+  res.send({ ok: true, kitchenId: kitchen.id, kitchen: summary });
+}));
+
 app.use((err, req, res, next) => {
   console.error('接口执行失败', err);
   const statusCode = err.statusCode || err.status || 500;
