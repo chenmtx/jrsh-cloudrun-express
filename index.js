@@ -1371,6 +1371,7 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
   });
   const kitchens = await Kitchen.findAll({
     attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenCode', 'kitchenInfo', 'dishes', 'createdAt', 'updatedAt'],
+    where: { dissolvedAt: null },
     order: [['updatedAt', 'DESC']]
   });
 
