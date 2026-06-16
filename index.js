@@ -423,6 +423,7 @@ async function toClientKitchenSummary(kitchen) {
     kitchenCode,
     name: info.name || `厨房${row.id}`,
     logo: info.logo || '',
+    bgImage: info.bgImage || '',
     dishCount: await getKitchenDishCount(row),
     businessDays: calculateBusinessDays(createdAt),
     isPublic: !!info.isPublic,
@@ -1362,6 +1363,52 @@ app.get('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
   }
 
   res.send(await toClientState(kitchen));
+}));
+
+app.get('/api/kitchens/public-search', asyncHandler(async (req, res) => {
+  const keyword = String((req.query && req.query.keyword) || '').trim().slice(0, 32);
+  if (!keyword) {
+    res.send({ kitchens: [] });
+    return;
+  }
+
+  const kitchens = await Kitchen.findAll({
+    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenCode', 'kitchenInfo', 'dishes', 'isPublic', 'businessOpen', 'businessStart', 'businessEnd', 'displaySettings', 'createdAt', 'updatedAt', 'dissolvedAt'],
+    where: {
+      dissolvedAt: null,
+      [Op.or]: [
+        { id: keyword },
+        { legacyId: keyword },
+        { kitchenCode: keyword }
+      ]
+    },
+    order: [['updatedAt', 'DESC']],
+    limit: 20
+  });
+
+  const summaries = (await Promise.all(kitchens.map(toClientKitchenSummary)))
+    .filter(kitchen => kitchen.isPublic);
+  const ownerIds = Array.from(new Set(summaries.map(kitchen => kitchen.ownerUserId).filter(Boolean)));
+  const users = ownerIds.length
+    ? await User.findAll({
+        attributes: ['id', 'nickname'],
+        where: { id: { [Op.in]: ownerIds } }
+      })
+    : [];
+  const nicknameById = users.reduce((map, user) => {
+    const row = user.toJSON ? user.toJSON() : user;
+    map[row.id] = row.nickname || '';
+    return map;
+  }, {});
+
+  res.send({
+    kitchens: summaries.map(kitchen => ({
+      ...kitchen,
+      ownerNickname: nicknameById[kitchen.ownerUserId] || '',
+      cloneCost: 1800,
+      level: 1
+    }))
+  });
 }));
 
 app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
