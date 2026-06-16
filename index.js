@@ -1433,10 +1433,18 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
     announcement: parseJson((kitchen.toJSON ? kitchen.toJSON() : kitchen).kitchenInfo, {}).announcement || '',
     updatedAt: (kitchen.toJSON ? kitchen.toJSON() : kitchen).updatedAt || null
   })));
+  const kitchensByUserId = kitchenRows.reduce((map, kitchen) => {
+    const ownerUserId = String(kitchen.ownerUserId || '');
+    if (!ownerUserId) return map;
+    if (!map[ownerUserId]) map[ownerUserId] = [];
+    map[ownerUserId].push(kitchen);
+    return map;
+  }, {});
 
   res.send({
     users: users.map(user => {
       const row = user.toJSON ? user.toJSON() : user;
+      const userKitchens = kitchensByUserId[String(row.id)] || [];
       return {
         id: row.id,
         openid: row.openid || '',
@@ -1444,7 +1452,8 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
         avatar: row.avatar || '',
         defaultOrderNote: row.defaultOrderNote || '',
         cabbageBalance: formatCabbageNumberText(row.cabbageBalance, 2200.00),
-        kitchenCount: kitchenCountByUserId[row.id] || 0,
+        kitchenCount: userKitchens.length || kitchenCountByUserId[row.id] || 0,
+        kitchens: userKitchens,
         updatedAt: row.updatedAt || null
       };
     }),
