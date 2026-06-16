@@ -447,6 +447,52 @@ function cloneDishForKitchen(dish) {
   };
 }
 
+function makeStolenDishKey(sourceKitchenId, sourceDishId) {
+  return `${String(sourceKitchenId || '').trim()}::${String(sourceDishId || '').trim()}`;
+}
+
+function normalizeStolenDishRecords(records) {
+  const source = Array.isArray(records) ? records : [];
+  const seen = new Set();
+  return source.reduce((result, item) => {
+    if (!item || typeof item !== 'object') return result;
+    const sourceKitchenId = String(item.sourceKitchenId || '').trim();
+    const sourceDishId = String(item.sourceDishId || '').trim();
+    if (!sourceKitchenId || !sourceDishId) return result;
+    const key = makeStolenDishKey(sourceKitchenId, sourceDishId);
+    if (seen.has(key)) return result;
+    seen.add(key);
+    result.push({
+      id: item.id || makeId('steal'),
+      sourceKitchenId,
+      sourceDishId,
+      targetDishId: String(item.targetDishId || '').trim(),
+      sourceKitchenName: String(item.sourceKitchenName || '').trim(),
+      dishName: String(item.dishName || '').trim(),
+      targetCategory: String(item.targetCategory || '未分类').trim() || '未分类',
+      cost: formatCabbageNumberText(item.cost, 200),
+      compensation: formatCabbageNumberText(item.compensation, 100),
+      stolenAt: String(item.stolenAt || new Date().toISOString())
+    });
+    return result;
+  }, []);
+}
+
+function stealDishForKitchen(dish, targetCategory, meta = {}) {
+  const sourceDishId = String(dish && dish.id !== undefined ? dish.id : '').trim();
+  return {
+    ...(dish || {}),
+    id: meta.targetDishId || makeId('dish'),
+    category: targetCategory || '未分类',
+    sales: 0,
+    sourceType: 'steal',
+    sourceKitchenId: String(meta.sourceKitchenId || '').trim(),
+    sourceDishId,
+    sourceKitchenName: String(meta.sourceKitchenName || '').trim(),
+    stolenAt: meta.stolenAt || new Date().toISOString()
+  };
+}
+
 async function toClientKitchenSummary(kitchen) {
   const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
   const info = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
@@ -1444,6 +1490,258 @@ app.get('/api/kitchens/public-search', asyncHandler(async (req, res) => {
       ownerNickname: nicknameById[kitchen.ownerUserId] || '',
       cloneCost: Number(kitchen.dishCount || 0) * 200
     }))
+  });
+}));
+
+app.post('/api/kitchens/:id/steal-dish', asyncHandler(async (req, res) => {
+  const sourceKitchenId = String(req.params.id || '').trim();
+  const body = req.body || {};
+  const operatorUserId = String(body.userId || body.clientUserId || getRequestUserId(req, body) || '').trim();
+  const targetKitchenId = String(body.targetKitchenId || '').trim();
+  const sourceDishId = String(body.sourceDishId || body.dishId || '').trim();
+  const targetCategory = (String(body.targetCategory || '未分类').trim() || '未分类').slice(0, 128);
+
+  if (!sourceKitchenId || !targetKitchenId || !sourceDishId || !operatorUserId) {
+    res.status(400).send({ ok: false, error: 'Steal dish required', message: '偷菜参数缺失' });
+    return;
+  }
+
+  const resolvedOperator = await findUserByIdOrLoginKey(operatorUserId);
+  if (!resolvedOperator) {
+    res.status(404).send({ ok: false, error: 'User not found', message: '用户不存在' });
+    return;
+  }
+
+  const resolvedSourceKitchen = await findKitchenByIdOrLegacy(sourceKitchenId);
+  if (!resolvedSourceKitchen) {
+    res.status(404).send({ ok: false, error: 'Source kitchen not found', message: '厨房不存在' });
+    return;
+  }
+
+  const resolvedTargetKitchen = await findKitchenByIdOrLegacy(targetKitchenId);
+  if (!resolvedTargetKitchen) {
+    res.status(404).send({ ok: false, error: 'Target kitchen not found', message: '当前厨房不存在' });
+    return;
+  }
+
+  const resolvedOperatorRow = resolvedOperator.toJSON ? resolvedOperator.toJSON() : resolvedOperator;
+  const resolvedSourceRow = resolvedSourceKitchen.toJSON ? resolvedSourceKitchen.toJSON() : resolvedSourceKitchen;
+  const resolvedTargetRow = resolvedTargetKitchen.toJSON ? resolvedTargetKitchen.toJSON() : resolvedTargetKitchen;
+  if (String(resolvedSourceRow.id) === String(resolvedTargetRow.id)) {
+    res.status(409).send({ ok: false, error: 'Cannot steal current kitchen', message: '不能偷当前厨房的菜' });
+    return;
+  }
+
+  const stealResult = await sequelize.transaction(async transaction => {
+    const loadLockedKitchen = async id => Kitchen.findOne({
+      where: { id, dissolvedAt: null },
+      transaction,
+      lock: true
+    });
+    const loadLockedKitchenDishes = async row => {
+      const legacyDishes = normalizeDishList(row.dishes);
+      const rows = await Dish.findAll({
+        where: { kitchenId: row.id },
+        order: [['sortIndex', 'ASC'], ['createdAt', 'ASC'], ['id', 'ASC']],
+        transaction,
+        lock: true
+      });
+      return rows.length > 0 ? rows.map(toClientDish) : legacyDishes;
+    };
+
+    const kitchenIds = Array.from(new Set([resolvedSourceRow.id, resolvedTargetRow.id].map(id => String(id)))).sort();
+    const kitchenById = {};
+    for (const id of kitchenIds) {
+      const kitchen = await loadLockedKitchen(id);
+      if (kitchen) kitchenById[id] = kitchen;
+    }
+
+    const sourceKitchen = kitchenById[String(resolvedSourceRow.id)];
+    const targetKitchen = kitchenById[String(resolvedTargetRow.id)];
+    if (!sourceKitchen) {
+      return { status: 404, payload: { ok: false, error: 'Source kitchen not found', message: '厨房不存在' } };
+    }
+    if (!targetKitchen) {
+      return { status: 404, payload: { ok: false, error: 'Target kitchen not found', message: '当前厨房不存在' } };
+    }
+
+    const sourceRow = sourceKitchen.toJSON ? sourceKitchen.toJSON() : sourceKitchen;
+    const targetRow = targetKitchen.toJSON ? targetKitchen.toJSON() : targetKitchen;
+    const sourceInfo = normalizeKitchenInfo(sourceRow.id, parseJson(sourceRow.kitchenInfo, {}), sourceRow);
+    const targetInfo = normalizeKitchenInfo(targetRow.id, parseJson(targetRow.kitchenInfo, {}), targetRow);
+    if (!sourceInfo.isPublic) {
+      return { status: 403, payload: { ok: false, error: 'Source kitchen is private', message: '该厨房已关闭公开，不能偷菜' } };
+    }
+    if (String(targetRow.ownerUserId) !== String(resolvedOperatorRow.id)) {
+      return { status: 403, payload: { ok: false, error: 'Target kitchen forbidden', message: '只能偷到自己的当前厨房' } };
+    }
+
+    const sourceDishes = await loadLockedKitchenDishes(sourceRow);
+    const targetDishes = await loadLockedKitchenDishes(targetRow);
+    const sourceDish = sourceDishes.find(dish => String(dish && dish.id) === sourceDishId);
+    if (!sourceDish) {
+      return { status: 404, payload: { ok: false, error: 'Source dish not found', message: '这个菜已经不存在了' } };
+    }
+
+    const stolenRecords = normalizeStolenDishRecords(targetInfo.stolenDishes);
+    const stolenKey = makeStolenDishKey(sourceRow.id, sourceDishId);
+    const existingRecord = stolenRecords.find(record => makeStolenDishKey(record.sourceKitchenId, record.sourceDishId) === stolenKey);
+    if (existingRecord) {
+      return {
+        status: 409,
+        payload: {
+          ok: false,
+          error: 'Dish already stolen',
+          message: '这个菜已经偷过了',
+          stolen: true,
+          record: existingRecord
+        }
+      };
+    }
+
+    const targetCategories = getKitchenCategoryList(targetRow, targetDishes);
+    if (targetCategory !== '未分类' && !targetCategories.includes(targetCategory)) {
+      return { status: 400, payload: { ok: false, error: 'Target category invalid', message: '请选择当前厨房已有分类' } };
+    }
+    const nextCategories = targetCategories.includes(targetCategory)
+      ? targetCategories
+      : targetCategories.concat(targetCategory);
+
+    const userIds = Array.from(new Set([resolvedOperatorRow.id, sourceRow.ownerUserId].filter(Boolean).map(id => String(id)))).sort();
+    const userById = {};
+    for (const id of userIds) {
+      const user = await User.findByPk(id, { transaction, lock: true });
+      if (user) userById[id] = user;
+    }
+    const operator = userById[String(resolvedOperatorRow.id)];
+    if (!operator) {
+      return { status: 404, payload: { ok: false, error: 'User not found', message: '用户不存在' } };
+    }
+
+    const stealCost = 200;
+    const compensation = 100;
+    const operatorRow = operator.toJSON ? operator.toJSON() : operator;
+    const operatorBalance = formatCabbageNumber(operatorRow.cabbageBalance, 2200.00);
+    if (operatorBalance < stealCost) {
+      return { status: 409, payload: { ok: false, error: 'Insufficient balance', message: '大白菜不足，偷菜需要 200 大白菜' } };
+    }
+
+    const owner = userById[String(sourceRow.ownerUserId)] || null;
+    const ownerRow = owner && owner.toJSON ? owner.toJSON() : owner;
+    const ownerBalance = owner ? formatCabbageNumber(ownerRow.cabbageBalance, 2200.00) : 0;
+    const sameBalanceUser = owner && String(ownerRow.id) === String(operatorRow.id);
+    const nextOperatorBalance = formatCabbageNumber(operatorBalance - stealCost, 0);
+    const nextOwnerBalance = formatCabbageNumber(ownerBalance + compensation, 0);
+    const nextSameUserBalance = formatCabbageNumber(operatorBalance - stealCost + compensation, 0);
+    const sourceKitchenName = sourceInfo.name || `厨房${sourceRow.id}`;
+    const dishName = String(sourceDish.name || '菜品').trim() || '菜品';
+    const stolenAt = new Date().toISOString();
+    const targetDishId = makeId('dish');
+    const stolenDish = stealDishForKitchen(sourceDish, targetCategory, {
+      targetDishId,
+      sourceKitchenId: sourceRow.id,
+      sourceKitchenName,
+      stolenAt
+    });
+    const nextDishes = targetDishes.concat(stolenDish);
+    const nextRecord = {
+      id: makeId('steal'),
+      sourceKitchenId: String(sourceRow.id),
+      sourceDishId,
+      targetDishId,
+      sourceKitchenName,
+      dishName,
+      targetCategory,
+      cost: formatCabbageNumberText(stealCost, 0),
+      compensation: formatCabbageNumberText(compensation, 0),
+      stolenAt
+    };
+    const nextTargetInfo = {
+      ...targetInfo,
+      stolenDishes: [nextRecord].concat(stolenRecords)
+    };
+
+    const operatorHistory = parseUserCabbageHistory(operatorRow, operatorBalance);
+    const ownerHistory = owner ? parseUserCabbageHistory(ownerRow, ownerBalance) : [];
+    const nextOperatorHistory = sameBalanceUser
+      ? [
+          makeCabbageHistoryEntry('add', compensation, `偷菜补偿(${dishName})`, nextSameUserBalance),
+          makeCabbageHistoryEntry('sub', stealCost, `偷菜消耗(${dishName})`, nextOperatorBalance),
+          ...operatorHistory
+        ]
+      : [
+          makeCabbageHistoryEntry('sub', stealCost, `偷菜消耗(${dishName})`, nextOperatorBalance),
+          ...operatorHistory
+        ];
+    const nextOwnerHistory = owner
+      ? [
+          makeCabbageHistoryEntry('add', compensation, `偷菜补偿(${dishName})`, nextOwnerBalance),
+          ...ownerHistory
+        ]
+      : ownerHistory;
+
+    await operator.update({
+      cabbageBalance: sameBalanceUser ? nextSameUserBalance : nextOperatorBalance,
+      cabbageHistory: stringifyJson(nextOperatorHistory, [])
+    }, { transaction });
+    if (owner && !sameBalanceUser) {
+      await owner.update({
+        cabbageBalance: nextOwnerBalance,
+        cabbageHistory: stringifyJson(nextOwnerHistory, [])
+      }, { transaction });
+    }
+    await targetKitchen.update({
+      kitchenInfo: stringifyJson(nextTargetInfo, {}),
+      categories: stringifyJson(nextCategories, []),
+      dishes: stringifyJson(nextDishes, [])
+    }, { transaction });
+    await Dish.destroy({
+      where: { kitchenId: targetRow.id },
+      transaction
+    });
+    if (nextDishes.length > 0) {
+      await Dish.bulkCreate(
+        nextDishes.map((dish, index) => toDishRow(targetRow.id, targetRow.ownerUserId, dish, index)),
+        { transaction }
+      );
+    }
+
+    return {
+      status: 200,
+      sourceKitchenId: sourceRow.id,
+      targetKitchenId: targetRow.id,
+      operatorId: operatorRow.id,
+      ownerId: ownerRow ? ownerRow.id : '',
+      targetDishId,
+      sourceDishId,
+      cost: formatCabbageNumberText(stealCost, 0),
+      compensation: formatCabbageNumberText(compensation, 0),
+      record: nextRecord
+    };
+  });
+
+  if (!stealResult || stealResult.status !== 200) {
+    const failure = stealResult || { status: 500, payload: { ok: false, error: 'Steal dish failed', message: '偷菜失败' } };
+    res.status(failure.status).send(failure.payload);
+    return;
+  }
+
+  const operator = await User.findByPk(stealResult.operatorId);
+  const owner = stealResult.ownerId ? await User.findByPk(stealResult.ownerId) : null;
+  const refreshedTargetKitchen = await findKitchenByIdOrLegacy(stealResult.targetKitchenId);
+
+  res.send({
+    ok: true,
+    sourceKitchenId: stealResult.sourceKitchenId,
+    targetKitchenId: stealResult.targetKitchenId,
+    sourceDishId: stealResult.sourceDishId,
+    targetDishId: stealResult.targetDishId,
+    cost: stealResult.cost,
+    compensation: stealResult.compensation,
+    record: stealResult.record,
+    user: await toClientUserWithDecoratedHistory(operator),
+    owner: owner ? await toClientUserWithDecoratedHistory(owner) : null,
+    ...(await toClientState(refreshedTargetKitchen))
   });
 }));
 
