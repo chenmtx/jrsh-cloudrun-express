@@ -442,7 +442,8 @@ function mergeKitchenCategories(targetCategories = [], sourceCategories = []) {
 function cloneDishForKitchen(dish) {
   return {
     ...(dish || {}),
-    id: makeId('dish')
+    id: makeId('dish'),
+    sales: 0
   };
 }
 
