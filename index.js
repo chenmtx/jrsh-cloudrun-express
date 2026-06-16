@@ -1634,6 +1634,7 @@ app.post('/api/kitchens/:id/steal-dish', asyncHandler(async (req, res) => {
     const nextOwnerBalance = formatCabbageNumber(ownerBalance + compensation, 0);
     const nextSameUserBalance = formatCabbageNumber(operatorBalance - stealCost + compensation, 0);
     const sourceKitchenName = sourceInfo.name || `厨房${sourceRow.id}`;
+    const targetKitchenName = targetInfo.name || `厨房${targetRow.id}`;
     const dishName = String(sourceDish.name || '菜品').trim() || '菜品';
     const stolenAt = new Date().toISOString();
     const targetDishId = makeId('dish');
@@ -1665,17 +1666,17 @@ app.post('/api/kitchens/:id/steal-dish', asyncHandler(async (req, res) => {
     const ownerHistory = owner ? parseUserCabbageHistory(ownerRow, ownerBalance) : [];
     const nextOperatorHistory = sameBalanceUser
       ? [
-          makeCabbageHistoryEntry('add', compensation, `偷菜补偿(${dishName})`, nextSameUserBalance),
-          makeCabbageHistoryEntry('sub', stealCost, `偷菜消耗(${dishName})`, nextOperatorBalance),
+          makeCabbageHistoryEntry('add', compensation, `偷菜补偿(${dishName}|偷菜方:${targetKitchenName}|被偷方:${sourceKitchenName})`, nextSameUserBalance),
+          makeCabbageHistoryEntry('sub', stealCost, `偷菜消耗(${dishName}|偷菜方:${targetKitchenName}|被偷方:${sourceKitchenName})`, nextOperatorBalance),
           ...operatorHistory
         ]
       : [
-          makeCabbageHistoryEntry('sub', stealCost, `偷菜消耗(${dishName})`, nextOperatorBalance),
+          makeCabbageHistoryEntry('sub', stealCost, `偷菜消耗(${dishName}|偷菜方:${targetKitchenName}|被偷方:${sourceKitchenName})`, nextOperatorBalance),
           ...operatorHistory
         ];
     const nextOwnerHistory = owner
       ? [
-          makeCabbageHistoryEntry('add', compensation, `偷菜补偿(${dishName})`, nextOwnerBalance),
+          makeCabbageHistoryEntry('add', compensation, `偷菜补偿(${dishName}|偷菜方:${targetKitchenName}|被偷方:${sourceKitchenName})`, nextOwnerBalance),
           ...ownerHistory
         ]
       : ownerHistory;
