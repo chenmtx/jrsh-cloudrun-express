@@ -1610,6 +1610,70 @@ app.post('/api/kitchens/:id/restore', asyncHandler(async (req, res) => {
   res.send({ ok: true, kitchenId: kitchen.id, kitchen: summary });
 }));
 
+app.delete('/api/kitchens/:id/permanent', asyncHandler(async (req, res) => {
+  const requestedKitchenId = String(req.params.id || '').trim();
+  const body = req.body || {};
+  if (!requestedKitchenId) {
+    res.status(400).send({ ok: false, error: 'Invalid kitchenId', message: '厨房 ID 不能为空' });
+    return;
+  }
+
+  let kitchen = await Kitchen.findByPk(requestedKitchenId);
+  if (!kitchen) {
+    kitchen = await Kitchen.findOne({ where: { kitchenCode: requestedKitchenId } });
+  }
+  if (!kitchen) {
+    kitchen = await Kitchen.findOne({ where: { legacyId: requestedKitchenId } });
+  }
+  if (!kitchen) {
+    res.status(404).send({ ok: false, error: 'Kitchen not found', message: '厨房不存在' });
+    return;
+  }
+
+  const operatorUserId = body.userId || getRequestUserId(req, body);
+  if (!operatorUserId || String(kitchen.ownerUserId) !== String(operatorUserId)) {
+    res.status(403).send({ ok: false, error: 'Forbidden', message: '只能永久删除自己的厨房' });
+    return;
+  }
+
+  if (!kitchen.dissolvedAt) {
+    res.status(409).send({ ok: false, error: 'Kitchen is active', message: '请先解散厨房后再永久删除' });
+    return;
+  }
+
+  const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const kitchenIds = Array.from(new Set([
+    row.id,
+    row.legacyId,
+    row.kitchenCode,
+    requestedKitchenId
+  ].filter(id => String(id || '').trim()).map(id => String(id).trim())));
+
+  let deletedOrders = 0;
+  let deletedDishes = 0;
+  await sequelize.transaction(async transaction => {
+    deletedOrders = await Order.destroy({
+      where: { kitchenId: { [Op.in]: kitchenIds } },
+      transaction
+    });
+    deletedDishes = await Dish.destroy({
+      where: { kitchenId: { [Op.in]: kitchenIds } },
+      transaction
+    });
+    await kitchen.destroy({ transaction });
+  });
+
+  res.send({
+    ok: true,
+    kitchenId: row.id,
+    deleted: {
+      kitchens: 1,
+      orders: deletedOrders,
+      dishes: deletedDishes
+    }
+  });
+}));
+
 app.use((err, req, res, next) => {
   console.error('接口执行失败', err);
   const statusCode = err.statusCode || err.status || 500;
