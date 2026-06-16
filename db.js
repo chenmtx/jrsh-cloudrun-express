@@ -236,6 +236,51 @@ function quoteIdentifier(value) {
   return `\`${String(value || '').replace(/`/g, '``')}\``;
 }
 
+function isDuplicateColumnError(err) {
+  return err && (err.errno === 1060 || err.original && err.original.errno === 1060);
+}
+
+async function columnExists(table, column) {
+  const [rows] = await sequelize.query(
+    `SHOW COLUMNS FROM ${quoteIdentifier(table)} LIKE ${sequelize.escape(column)}`
+  );
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+async function addColumnIfMissing(table, column, definition) {
+  try {
+    if (await columnExists(table, column)) return;
+    await sequelize.query(
+      `ALTER TABLE ${quoteIdentifier(table)} ADD COLUMN ${quoteIdentifier(column)} ${definition}`
+    );
+  } catch (err) {
+    if (isDuplicateColumnError(err)) return;
+    throw err;
+  }
+}
+
+async function ensureRequiredColumns() {
+  await addColumnIfMissing('JrshUser', 'defaultOrderNote', "VARCHAR(300) NULL DEFAULT ''");
+  await addColumnIfMissing('JrshUser', 'cabbageBalance', 'DECIMAL(12,2) NOT NULL DEFAULT 2200.00');
+  await addColumnIfMissing('JrshUser', 'cabbageHistory', 'LONGTEXT NULL');
+
+  await addColumnIfMissing('JrshKitchen', 'legacyId', 'VARCHAR(128) NULL');
+  await addColumnIfMissing('JrshKitchen', 'kitchenCode', 'VARCHAR(6) NULL');
+  await addColumnIfMissing('JrshKitchen', 'lastQueueCode', 'INTEGER NULL');
+  await addColumnIfMissing('JrshKitchen', 'isPublic', 'TINYINT(1) NOT NULL DEFAULT 0');
+  await addColumnIfMissing('JrshKitchen', 'businessOpen', 'TINYINT(1) NOT NULL DEFAULT 1');
+  await addColumnIfMissing('JrshKitchen', 'businessStart', "VARCHAR(8) NOT NULL DEFAULT '00:00'");
+  await addColumnIfMissing('JrshKitchen', 'businessEnd', "VARCHAR(8) NOT NULL DEFAULT '23:59'");
+  await addColumnIfMissing('JrshKitchen', 'displaySettings', 'LONGTEXT NULL');
+  await addColumnIfMissing('JrshKitchen', 'dissolvedAt', 'DATETIME NULL');
+
+  await addColumnIfMissing('JrshOrder', 'orderedAt', 'DATETIME NULL');
+  await addColumnIfMissing('JrshOrder', 'payload', 'LONGTEXT NULL');
+
+  await addColumnIfMissing('JrshDish', 'sortIndex', 'INTEGER NOT NULL DEFAULT 0');
+  await addColumnIfMissing('JrshDish', 'payload', 'LONGTEXT NULL');
+}
+
 async function ensureUtf8mb4() {
   const tables = ['JrshUser', 'JrshKitchen', 'JrshOrder', 'JrshDish'];
   try {
@@ -255,10 +300,11 @@ async function ensureUtf8mb4() {
 
 async function init() {
   await sequelize.authenticate();
-  await User.sync({ alter: true });
-  await Kitchen.sync({ alter: true });
-  await Dish.sync({ alter: true });
-  await Order.sync({ alter: true });
+  await User.sync();
+  await Kitchen.sync();
+  await Dish.sync();
+  await Order.sync();
+  await ensureRequiredColumns();
   await ensureUtf8mb4();
 }
 
