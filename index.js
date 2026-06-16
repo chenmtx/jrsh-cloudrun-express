@@ -1041,7 +1041,7 @@ function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {})
 async function ensureDefaultKitchenForUser(userId, state = {}, user = {}) {
   const defaultKitchenName = makeDefaultKitchenName(user.nickname);
   let kitchen = await Kitchen.findOne({
-    where: { ownerUserId: userId },
+    where: { ownerUserId: userId, dissolvedAt: null },
     order: [['updatedAt', 'DESC']]
   });
   kitchen = await migrateLegacyKitchen(kitchen);
