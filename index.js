@@ -411,6 +411,41 @@ async function getKitchenDishCount(row) {
   return normalizeDishList(row.dishes).length;
 }
 
+function getKitchenCategoryList(row, dishes = []) {
+  const rawCategories = parseJson(row && row.categories, []);
+  const categories = Array.isArray(rawCategories) ? rawCategories : [];
+  const result = [];
+  const seen = new Set();
+
+  categories.concat((dishes || []).map(dish => dish && dish.category)).forEach(category => {
+    const text = String(category || '').trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    result.push(text);
+  });
+
+  return result.length > 0 ? result : ['未分类'];
+}
+
+function mergeKitchenCategories(targetCategories = [], sourceCategories = []) {
+  const result = [];
+  const seen = new Set();
+  targetCategories.concat(sourceCategories).forEach(category => {
+    const text = String(category || '').trim();
+    if (!text || seen.has(text)) return;
+    seen.add(text);
+    result.push(text);
+  });
+  return result.length > 0 ? result : ['未分类'];
+}
+
+function cloneDishForKitchen(dish) {
+  return {
+    ...(dish || {}),
+    id: makeId('dish')
+  };
+}
+
 async function toClientKitchenSummary(kitchen) {
   const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
   const info = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
@@ -1405,9 +1440,135 @@ app.get('/api/kitchens/public-search', asyncHandler(async (req, res) => {
     kitchens: summaries.map(kitchen => ({
       ...kitchen,
       ownerNickname: nicknameById[kitchen.ownerUserId] || '',
-      cloneCost: 1800,
-      level: 1
+      cloneCost: Number(kitchen.dishCount || 0) * 200
     }))
+  });
+}));
+
+app.post('/api/kitchens/:id/clone', asyncHandler(async (req, res) => {
+  const sourceKitchenId = String(req.params.id || '').trim();
+  const body = req.body || {};
+  const operatorUserId = String(body.userId || body.clientUserId || getRequestUserId(req, body) || '').trim();
+  const targetKitchenId = String(body.targetKitchenId || '').trim();
+
+  if (!sourceKitchenId || !targetKitchenId || !operatorUserId) {
+    res.status(400).send({ ok: false, error: 'Clone kitchen required' });
+    return;
+  }
+
+  const operator = await findUserByIdOrLoginKey(operatorUserId);
+  if (!operator) {
+    res.status(404).send({ ok: false, error: 'User not found', message: '用户不存在' });
+    return;
+  }
+
+  const sourceKitchen = await findKitchenByIdOrLegacy(sourceKitchenId);
+  if (!sourceKitchen) {
+    res.status(404).send({ ok: false, error: 'Source kitchen not found', message: '厨房不存在' });
+    return;
+  }
+
+  const targetKitchen = await findKitchenByIdOrLegacy(targetKitchenId);
+  if (!targetKitchen) {
+    res.status(404).send({ ok: false, error: 'Target kitchen not found', message: '当前厨房不存在' });
+    return;
+  }
+
+  const sourceRow = sourceKitchen.toJSON ? sourceKitchen.toJSON() : sourceKitchen;
+  const targetRow = targetKitchen.toJSON ? targetKitchen.toJSON() : targetKitchen;
+  const operatorRow = operator.toJSON ? operator.toJSON() : operator;
+  const sourceInfo = normalizeKitchenInfo(sourceRow.id, parseJson(sourceRow.kitchenInfo, {}), sourceRow);
+  if (!sourceInfo.isPublic) {
+    res.status(403).send({ ok: false, error: 'Source kitchen is private', message: '该厨房未公开，不能克隆' });
+    return;
+  }
+  if (String(sourceRow.ownerUserId) === String(operatorRow.id)) {
+    res.status(409).send({ ok: false, error: 'Cannot clone own kitchen', message: '不能克隆自己的厨房' });
+    return;
+  }
+  if (String(targetRow.ownerUserId) !== String(operatorRow.id)) {
+    res.status(403).send({ ok: false, error: 'Target kitchen forbidden', message: '只能克隆到自己的当前厨房' });
+    return;
+  }
+
+  const sourceDishes = await loadKitchenDishes(sourceKitchen);
+  const targetDishes = await loadKitchenDishes(targetKitchen);
+  const sourceCategories = getKitchenCategoryList(sourceRow, sourceDishes);
+  const targetCategories = getKitchenCategoryList(targetRow, targetDishes);
+  const nextCategories = mergeKitchenCategories(targetCategories, sourceCategories);
+  const clonedDishes = sourceDishes.map(cloneDishForKitchen);
+  const nextDishes = targetDishes.concat(clonedDishes);
+  const cloneCost = sourceDishes.length * 200;
+  const compensation = Math.floor(cloneCost / 2);
+  const operatorBalance = formatCabbageNumber(operatorRow.cabbageBalance, 2200.00);
+  if (operatorBalance < cloneCost) {
+    res.status(409).send({ ok: false, error: 'Insufficient balance', message: '大白菜余额不足' });
+    return;
+  }
+
+  const owner = await User.findByPk(sourceRow.ownerUserId);
+  const ownerRow = owner && owner.toJSON ? owner.toJSON() : owner;
+  const ownerBalance = owner ? formatCabbageNumber(ownerRow.cabbageBalance, 2200.00) : 0;
+  const nextOperatorBalance = formatCabbageNumber(operatorBalance - cloneCost, 0);
+  const nextOwnerBalance = formatCabbageNumber(ownerBalance + compensation, 0);
+  const sourceKitchenName = sourceInfo.name || `厨房${sourceRow.id}`;
+  const operatorHistory = parseUserCabbageHistory(operatorRow, operatorBalance);
+  const ownerHistory = owner ? parseUserCabbageHistory(ownerRow, ownerBalance) : [];
+  const nextOperatorHistory = cloneCost > 0
+    ? [
+        makeCabbageHistoryEntry('sub', cloneCost, `克隆厨房-消耗(${sourceKitchenName})`, nextOperatorBalance),
+        ...operatorHistory
+      ]
+    : operatorHistory;
+  const nextOwnerHistory = owner && compensation > 0
+    ? [
+        makeCabbageHistoryEntry('add', compensation, `厨房被克隆-补偿(${sourceKitchenName})`, nextOwnerBalance),
+        ...ownerHistory
+      ]
+    : ownerHistory;
+
+  await sequelize.transaction(async transaction => {
+    await operator.update({
+      cabbageBalance: nextOperatorBalance,
+      cabbageHistory: stringifyJson(nextOperatorHistory, [])
+    }, { transaction });
+    if (owner && compensation > 0) {
+      await owner.update({
+        cabbageBalance: nextOwnerBalance,
+        cabbageHistory: stringifyJson(nextOwnerHistory, [])
+      }, { transaction });
+    }
+    await targetKitchen.update({
+      categories: stringifyJson(nextCategories, []),
+      dishes: stringifyJson(nextDishes, [])
+    }, { transaction });
+    await Dish.destroy({
+      where: { kitchenId: targetRow.id },
+      transaction
+    });
+    if (nextDishes.length > 0) {
+      await Dish.bulkCreate(
+        nextDishes.map((dish, index) => toDishRow(targetRow.id, targetRow.ownerUserId, dish, index)),
+        { transaction }
+      );
+    }
+  });
+
+  await operator.reload();
+  if (owner) await owner.reload();
+  const refreshedTargetKitchen = await findKitchenByIdOrLegacy(targetRow.id);
+
+  res.send({
+    ok: true,
+    sourceKitchenId: sourceRow.id,
+    targetKitchenId: targetRow.id,
+    clonedDishCount: clonedDishes.length,
+    addedCategoryCount: nextCategories.length - targetCategories.length,
+    cloneCost: formatCabbageNumberText(cloneCost, 0),
+    compensation: formatCabbageNumberText(compensation, 0),
+    user: await toClientUserWithDecoratedHistory(operator),
+    owner: owner ? await toClientUserWithDecoratedHistory(owner) : null,
+    ...(await toClientState(refreshedTargetKitchen))
   });
 }));
 
