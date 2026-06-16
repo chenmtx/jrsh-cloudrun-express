@@ -1402,24 +1402,25 @@ app.get('/api/kitchens/:id/state', asyncHandler(async (req, res) => {
 
 app.get('/api/kitchens/public-search', asyncHandler(async (req, res) => {
   const keyword = String((req.query && req.query.keyword) || '').trim().slice(0, 32);
-  if (!keyword) {
-    res.send({ kitchens: [] });
-    return;
-  }
+  const where = keyword
+    ? {
+        dissolvedAt: null,
+        [Op.or]: [
+          { id: keyword },
+          { legacyId: keyword },
+          { kitchenCode: keyword }
+        ]
+      }
+    : { dissolvedAt: null };
 
-  const kitchens = await Kitchen.findAll({
+  const queryOptions = {
     attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenCode', 'kitchenInfo', 'dishes', 'isPublic', 'businessOpen', 'businessStart', 'businessEnd', 'displaySettings', 'createdAt', 'updatedAt', 'dissolvedAt'],
-    where: {
-      dissolvedAt: null,
-      [Op.or]: [
-        { id: keyword },
-        { legacyId: keyword },
-        { kitchenCode: keyword }
-      ]
-    },
-    order: [['updatedAt', 'DESC']],
-    limit: 20
-  });
+    where,
+    order: [['updatedAt', 'DESC']]
+  };
+  if (keyword) queryOptions.limit = 20;
+
+  const kitchens = await Kitchen.findAll(queryOptions);
 
   const summaries = (await Promise.all(kitchens.map(toClientKitchenSummary)))
     .filter(kitchen => kitchen.isPublic);
@@ -1456,86 +1457,130 @@ app.post('/api/kitchens/:id/clone', asyncHandler(async (req, res) => {
     return;
   }
 
-  const operator = await findUserByIdOrLoginKey(operatorUserId);
-  if (!operator) {
+  const resolvedOperator = await findUserByIdOrLoginKey(operatorUserId);
+  if (!resolvedOperator) {
     res.status(404).send({ ok: false, error: 'User not found', message: '用户不存在' });
     return;
   }
 
-  const sourceKitchen = await findKitchenByIdOrLegacy(sourceKitchenId);
-  if (!sourceKitchen) {
+  const resolvedSourceKitchen = await findKitchenByIdOrLegacy(sourceKitchenId);
+  if (!resolvedSourceKitchen) {
     res.status(404).send({ ok: false, error: 'Source kitchen not found', message: '厨房不存在' });
     return;
   }
 
-  const targetKitchen = await findKitchenByIdOrLegacy(targetKitchenId);
-  if (!targetKitchen) {
+  const resolvedTargetKitchen = await findKitchenByIdOrLegacy(targetKitchenId);
+  if (!resolvedTargetKitchen) {
     res.status(404).send({ ok: false, error: 'Target kitchen not found', message: '当前厨房不存在' });
     return;
   }
 
-  const sourceRow = sourceKitchen.toJSON ? sourceKitchen.toJSON() : sourceKitchen;
-  const targetRow = targetKitchen.toJSON ? targetKitchen.toJSON() : targetKitchen;
-  const operatorRow = operator.toJSON ? operator.toJSON() : operator;
-  const sourceInfo = normalizeKitchenInfo(sourceRow.id, parseJson(sourceRow.kitchenInfo, {}), sourceRow);
-  if (!sourceInfo.isPublic) {
-    res.status(403).send({ ok: false, error: 'Source kitchen is private', message: '该厨房未公开，不能克隆' });
-    return;
-  }
-  if (String(sourceRow.id) === String(targetRow.id)) {
+  const resolvedOperatorRow = resolvedOperator.toJSON ? resolvedOperator.toJSON() : resolvedOperator;
+  const resolvedSourceRow = resolvedSourceKitchen.toJSON ? resolvedSourceKitchen.toJSON() : resolvedSourceKitchen;
+  const resolvedTargetRow = resolvedTargetKitchen.toJSON ? resolvedTargetKitchen.toJSON() : resolvedTargetKitchen;
+  if (String(resolvedSourceRow.id) === String(resolvedTargetRow.id)) {
     res.status(409).send({ ok: false, error: 'Cannot clone current kitchen', message: '不能克隆当前厨房' });
     return;
   }
-  if (String(targetRow.ownerUserId) !== String(operatorRow.id)) {
-    res.status(403).send({ ok: false, error: 'Target kitchen forbidden', message: '只能克隆到自己的当前厨房' });
-    return;
-  }
 
-  const sourceDishes = await loadKitchenDishes(sourceKitchen);
-  const targetDishes = await loadKitchenDishes(targetKitchen);
-  const sourceCategories = getKitchenCategoryList(sourceRow, sourceDishes);
-  const targetCategories = getKitchenCategoryList(targetRow, targetDishes);
-  const nextCategories = mergeKitchenCategories(targetCategories, sourceCategories);
-  const clonedDishes = sourceDishes.map(cloneDishForKitchen);
-  const nextDishes = targetDishes.concat(clonedDishes);
-  const cloneCost = sourceDishes.length * 200;
-  const compensation = Math.floor(cloneCost / 2);
-  const operatorBalance = formatCabbageNumber(operatorRow.cabbageBalance, 2200.00);
-  if (operatorBalance < cloneCost) {
-    res.status(409).send({ ok: false, error: 'Insufficient balance', message: '大白菜余额不足' });
-    return;
-  }
+  const cloneResult = await sequelize.transaction(async transaction => {
+    const loadLockedKitchen = async id => Kitchen.findOne({
+      where: { id, dissolvedAt: null },
+      transaction,
+      lock: true
+    });
+    const loadLockedKitchenDishes = async row => {
+      const legacyDishes = normalizeDishList(row.dishes);
+      const rows = await Dish.findAll({
+        where: { kitchenId: row.id },
+        order: [['sortIndex', 'ASC'], ['createdAt', 'ASC'], ['id', 'ASC']],
+        transaction,
+        lock: true
+      });
+      return rows.length > 0 ? rows.map(toClientDish) : legacyDishes;
+    };
 
-  const owner = await User.findByPk(sourceRow.ownerUserId);
-  const ownerRow = owner && owner.toJSON ? owner.toJSON() : owner;
-  const ownerBalance = owner ? formatCabbageNumber(ownerRow.cabbageBalance, 2200.00) : 0;
-  const sameBalanceUser = owner && String(ownerRow.id) === String(operatorRow.id);
-  const nextOperatorBalance = formatCabbageNumber(operatorBalance - cloneCost, 0);
-  const nextOwnerBalance = formatCabbageNumber(ownerBalance + compensation, 0);
-  const nextSameUserBalance = formatCabbageNumber(operatorBalance - cloneCost + compensation, 0);
-  const sourceKitchenName = sourceInfo.name || `厨房${sourceRow.id}`;
-  const operatorHistory = parseUserCabbageHistory(operatorRow, operatorBalance);
-  const ownerHistory = owner ? parseUserCabbageHistory(ownerRow, ownerBalance) : [];
-  const nextOperatorHistory = sameBalanceUser
-    ? [
-        ...(compensation > 0 ? [makeCabbageHistoryEntry('add', compensation, `厨房被克隆-补偿(${sourceKitchenName})`, nextSameUserBalance)] : []),
-        ...(cloneCost > 0 ? [makeCabbageHistoryEntry('sub', cloneCost, `克隆厨房-消耗(${sourceKitchenName})`, nextOperatorBalance)] : []),
-        ...operatorHistory
-      ]
-    : (cloneCost > 0
-    ? [
-        makeCabbageHistoryEntry('sub', cloneCost, `克隆厨房-消耗(${sourceKitchenName})`, nextOperatorBalance),
-        ...operatorHistory
-      ]
-    : operatorHistory);
-  const nextOwnerHistory = owner && compensation > 0
-    ? [
-        makeCabbageHistoryEntry('add', compensation, `厨房被克隆-补偿(${sourceKitchenName})`, nextOwnerBalance),
-        ...ownerHistory
-      ]
-    : ownerHistory;
+    const kitchenIds = Array.from(new Set([resolvedSourceRow.id, resolvedTargetRow.id].map(id => String(id)))).sort();
+    const kitchenById = {};
+    for (const id of kitchenIds) {
+      const kitchen = await loadLockedKitchen(id);
+      if (kitchen) kitchenById[id] = kitchen;
+    }
 
-  await sequelize.transaction(async transaction => {
+    const sourceKitchen = kitchenById[String(resolvedSourceRow.id)];
+    const targetKitchen = kitchenById[String(resolvedTargetRow.id)];
+    if (!sourceKitchen) {
+      return { status: 404, payload: { ok: false, error: 'Source kitchen not found', message: '厨房不存在' } };
+    }
+    if (!targetKitchen) {
+      return { status: 404, payload: { ok: false, error: 'Target kitchen not found', message: '当前厨房不存在' } };
+    }
+
+    const sourceRow = sourceKitchen.toJSON ? sourceKitchen.toJSON() : sourceKitchen;
+    const targetRow = targetKitchen.toJSON ? targetKitchen.toJSON() : targetKitchen;
+    const sourceInfo = normalizeKitchenInfo(sourceRow.id, parseJson(sourceRow.kitchenInfo, {}), sourceRow);
+    if (!sourceInfo.isPublic) {
+      return { status: 403, payload: { ok: false, error: 'Source kitchen is private', message: '该厨房未公开，不能克隆' } };
+    }
+    if (String(targetRow.ownerUserId) !== String(resolvedOperatorRow.id)) {
+      return { status: 403, payload: { ok: false, error: 'Target kitchen forbidden', message: '只能克隆到自己的当前厨房' } };
+    }
+
+    const userIds = Array.from(new Set([resolvedOperatorRow.id, sourceRow.ownerUserId].filter(Boolean).map(id => String(id)))).sort();
+    const userById = {};
+    for (const id of userIds) {
+      const user = await User.findByPk(id, { transaction, lock: true });
+      if (user) userById[id] = user;
+    }
+    const operator = userById[String(resolvedOperatorRow.id)];
+    if (!operator) {
+      return { status: 404, payload: { ok: false, error: 'User not found', message: '用户不存在' } };
+    }
+
+    const operatorRow = operator.toJSON ? operator.toJSON() : operator;
+    const sourceDishes = await loadLockedKitchenDishes(sourceRow);
+    const targetDishes = await loadLockedKitchenDishes(targetRow);
+    const sourceCategories = getKitchenCategoryList(sourceRow, sourceDishes);
+    const targetCategories = getKitchenCategoryList(targetRow, targetDishes);
+    const nextCategories = mergeKitchenCategories(targetCategories, sourceCategories);
+    const clonedDishes = sourceDishes.map(cloneDishForKitchen);
+    const nextDishes = targetDishes.concat(clonedDishes);
+    const cloneCost = sourceDishes.length * 200;
+    const compensation = Math.floor(cloneCost / 2);
+    const operatorBalance = formatCabbageNumber(operatorRow.cabbageBalance, 2200.00);
+    if (operatorBalance < cloneCost) {
+      return { status: 409, payload: { ok: false, error: 'Insufficient balance', message: '大白菜余额不足' } };
+    }
+
+    const owner = userById[String(sourceRow.ownerUserId)] || null;
+    const ownerRow = owner && owner.toJSON ? owner.toJSON() : owner;
+    const ownerBalance = owner ? formatCabbageNumber(ownerRow.cabbageBalance, 2200.00) : 0;
+    const sameBalanceUser = owner && String(ownerRow.id) === String(operatorRow.id);
+    const nextOperatorBalance = formatCabbageNumber(operatorBalance - cloneCost, 0);
+    const nextOwnerBalance = formatCabbageNumber(ownerBalance + compensation, 0);
+    const nextSameUserBalance = formatCabbageNumber(operatorBalance - cloneCost + compensation, 0);
+    const sourceKitchenName = sourceInfo.name || `厨房${sourceRow.id}`;
+    const operatorHistory = parseUserCabbageHistory(operatorRow, operatorBalance);
+    const ownerHistory = owner ? parseUserCabbageHistory(ownerRow, ownerBalance) : [];
+    const nextOperatorHistory = sameBalanceUser
+      ? [
+          ...(compensation > 0 ? [makeCabbageHistoryEntry('add', compensation, `厨房被克隆-补偿(${sourceKitchenName})`, nextSameUserBalance)] : []),
+          ...(cloneCost > 0 ? [makeCabbageHistoryEntry('sub', cloneCost, `克隆厨房-消耗(${sourceKitchenName})`, nextOperatorBalance)] : []),
+          ...operatorHistory
+        ]
+      : (cloneCost > 0
+      ? [
+          makeCabbageHistoryEntry('sub', cloneCost, `克隆厨房-消耗(${sourceKitchenName})`, nextOperatorBalance),
+          ...operatorHistory
+        ]
+      : operatorHistory);
+    const nextOwnerHistory = owner && compensation > 0
+      ? [
+          makeCabbageHistoryEntry('add', compensation, `厨房被克隆-补偿(${sourceKitchenName})`, nextOwnerBalance),
+          ...ownerHistory
+        ]
+      : ownerHistory;
+
     await operator.update({
       cabbageBalance: sameBalanceUser ? nextSameUserBalance : nextOperatorBalance,
       cabbageHistory: stringifyJson(nextOperatorHistory, [])
@@ -1560,20 +1605,38 @@ app.post('/api/kitchens/:id/clone', asyncHandler(async (req, res) => {
         { transaction }
       );
     }
+
+    return {
+      status: 200,
+      sourceKitchenId: sourceRow.id,
+      targetKitchenId: targetRow.id,
+      operatorId: operatorRow.id,
+      ownerId: ownerRow ? ownerRow.id : '',
+      clonedDishCount: clonedDishes.length,
+      addedCategoryCount: nextCategories.length - targetCategories.length,
+      cloneCost: formatCabbageNumberText(cloneCost, 0),
+      compensation: formatCabbageNumberText(compensation, 0)
+    };
   });
 
-  await operator.reload();
-  if (owner) await owner.reload();
-  const refreshedTargetKitchen = await findKitchenByIdOrLegacy(targetRow.id);
+  if (!cloneResult || cloneResult.status !== 200) {
+    const failure = cloneResult || { status: 500, payload: { ok: false, error: 'Clone kitchen failed', message: '克隆失败' } };
+    res.status(failure.status).send(failure.payload);
+    return;
+  }
+
+  const operator = await User.findByPk(cloneResult.operatorId);
+  const owner = cloneResult.ownerId ? await User.findByPk(cloneResult.ownerId) : null;
+  const refreshedTargetKitchen = await findKitchenByIdOrLegacy(cloneResult.targetKitchenId);
 
   res.send({
     ok: true,
-    sourceKitchenId: sourceRow.id,
-    targetKitchenId: targetRow.id,
-    clonedDishCount: clonedDishes.length,
-    addedCategoryCount: nextCategories.length - targetCategories.length,
-    cloneCost: formatCabbageNumberText(cloneCost, 0),
-    compensation: formatCabbageNumberText(compensation, 0),
+    sourceKitchenId: cloneResult.sourceKitchenId,
+    targetKitchenId: cloneResult.targetKitchenId,
+    clonedDishCount: cloneResult.clonedDishCount,
+    addedCategoryCount: cloneResult.addedCategoryCount,
+    cloneCost: cloneResult.cloneCost,
+    compensation: cloneResult.compensation,
     user: await toClientUserWithDecoratedHistory(operator),
     owner: owner ? await toClientUserWithDecoratedHistory(owner) : null,
     ...(await toClientState(refreshedTargetKitchen))
