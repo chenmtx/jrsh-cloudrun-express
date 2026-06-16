@@ -1482,8 +1482,8 @@ app.post('/api/kitchens/:id/clone', asyncHandler(async (req, res) => {
     res.status(403).send({ ok: false, error: 'Source kitchen is private', message: '该厨房未公开，不能克隆' });
     return;
   }
-  if (String(sourceRow.ownerUserId) === String(operatorRow.id)) {
-    res.status(409).send({ ok: false, error: 'Cannot clone own kitchen', message: '不能克隆自己的厨房' });
+  if (String(sourceRow.id) === String(targetRow.id)) {
+    res.status(409).send({ ok: false, error: 'Cannot clone current kitchen', message: '不能克隆当前厨房' });
     return;
   }
   if (String(targetRow.ownerUserId) !== String(operatorRow.id)) {
@@ -1509,17 +1509,25 @@ app.post('/api/kitchens/:id/clone', asyncHandler(async (req, res) => {
   const owner = await User.findByPk(sourceRow.ownerUserId);
   const ownerRow = owner && owner.toJSON ? owner.toJSON() : owner;
   const ownerBalance = owner ? formatCabbageNumber(ownerRow.cabbageBalance, 2200.00) : 0;
+  const sameBalanceUser = owner && String(ownerRow.id) === String(operatorRow.id);
   const nextOperatorBalance = formatCabbageNumber(operatorBalance - cloneCost, 0);
   const nextOwnerBalance = formatCabbageNumber(ownerBalance + compensation, 0);
+  const nextSameUserBalance = formatCabbageNumber(operatorBalance - cloneCost + compensation, 0);
   const sourceKitchenName = sourceInfo.name || `厨房${sourceRow.id}`;
   const operatorHistory = parseUserCabbageHistory(operatorRow, operatorBalance);
   const ownerHistory = owner ? parseUserCabbageHistory(ownerRow, ownerBalance) : [];
-  const nextOperatorHistory = cloneCost > 0
+  const nextOperatorHistory = sameBalanceUser
+    ? [
+        ...(compensation > 0 ? [makeCabbageHistoryEntry('add', compensation, `厨房被克隆-补偿(${sourceKitchenName})`, nextSameUserBalance)] : []),
+        ...(cloneCost > 0 ? [makeCabbageHistoryEntry('sub', cloneCost, `克隆厨房-消耗(${sourceKitchenName})`, nextOperatorBalance)] : []),
+        ...operatorHistory
+      ]
+    : (cloneCost > 0
     ? [
         makeCabbageHistoryEntry('sub', cloneCost, `克隆厨房-消耗(${sourceKitchenName})`, nextOperatorBalance),
         ...operatorHistory
       ]
-    : operatorHistory;
+    : operatorHistory);
   const nextOwnerHistory = owner && compensation > 0
     ? [
         makeCabbageHistoryEntry('add', compensation, `厨房被克隆-补偿(${sourceKitchenName})`, nextOwnerBalance),
@@ -1529,10 +1537,10 @@ app.post('/api/kitchens/:id/clone', asyncHandler(async (req, res) => {
 
   await sequelize.transaction(async transaction => {
     await operator.update({
-      cabbageBalance: nextOperatorBalance,
+      cabbageBalance: sameBalanceUser ? nextSameUserBalance : nextOperatorBalance,
       cabbageHistory: stringifyJson(nextOperatorHistory, [])
     }, { transaction });
-    if (owner && compensation > 0) {
+    if (owner && !sameBalanceUser && compensation > 0) {
       await owner.update({
         cabbageBalance: nextOwnerBalance,
         cabbageHistory: stringifyJson(nextOwnerHistory, [])
