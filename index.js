@@ -493,11 +493,51 @@ function stealDishForKitchen(dish, targetCategory, meta = {}) {
   };
 }
 
+function calculateKitchenRecommendationScore({ info = {}, dishCount = 0, categories = [], dishes = [], updatedAt = null }) {
+  const safeDishCount = Math.max(0, Number(dishCount || 0));
+  const dishScore = Math.min(safeDishCount, 20) / 20 * 50;
+  const hasName = !!String(info.name || '').trim();
+  const hasAnnouncement = !!String(info.announcement || '').trim();
+  const imageDishCount = (Array.isArray(dishes) ? dishes : []).filter(dish => dish && dish.image).length;
+  const imageRatio = safeDishCount > 0 ? Math.min(imageDishCount / safeDishCount, 1) : 0;
+  const completenessScore = [
+    info.bgImage ? 8 : 0,
+    info.logo ? 5 : 0,
+    hasName ? 4 : 0,
+    hasAnnouncement ? 4 : 0,
+    Array.isArray(categories) && categories.length > 0 ? 4 : 0,
+    imageRatio * 5
+  ].reduce((sum, value) => sum + value, 0);
+  const updatedTime = new Date(updatedAt || 0).getTime();
+  const elapsedDays = Number.isFinite(updatedTime)
+    ? (Date.now() - updatedTime) / 86400000
+    : Infinity;
+  const activeScore = elapsedDays <= 7 ? 20 : (elapsedDays <= 30 ? 10 : 0);
+  return Number((dishScore + completenessScore + activeScore).toFixed(2));
+}
+
+function compareKitchenRecommendation(left, right) {
+  const leftHasDish = Number(left && left.dishCount || 0) > 0 ? 1 : 0;
+  const rightHasDish = Number(right && right.dishCount || 0) > 0 ? 1 : 0;
+  if (leftHasDish !== rightHasDish) return rightHasDish - leftHasDish;
+
+  const scoreDiff = Number(right && right.recommendationScore || 0) - Number(left && left.recommendationScore || 0);
+  if (scoreDiff !== 0) return scoreDiff;
+
+  const leftTime = new Date(left && left.updatedAt || 0).getTime();
+  const rightTime = new Date(right && right.updatedAt || 0).getTime();
+  return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+}
+
 async function toClientKitchenSummary(kitchen) {
   const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
   const info = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
   const kitchenCode = await ensureKitchenCode(kitchen);
   const createdAt = row.createdAt || null;
+  const dishes = normalizeDishList(row.dishes);
+  const categories = getKitchenCategoryList(row, dishes);
+  const dishCount = await getKitchenDishCount(row);
+  const updatedAt = row.updatedAt || null;
   return {
     id: row.id,
     ownerUserId: row.ownerUserId || '',
@@ -506,7 +546,7 @@ async function toClientKitchenSummary(kitchen) {
     name: info.name || `厨房${row.id}`,
     logo: info.logo || '',
     bgImage: info.bgImage || '',
-    dishCount: await getKitchenDishCount(row),
+    dishCount,
     businessDays: calculateBusinessDays(createdAt),
     isPublic: !!info.isPublic,
     businessOpen: !!info.businessOpen,
@@ -514,7 +554,14 @@ async function toClientKitchenSummary(kitchen) {
     businessEnd: info.businessEnd,
     displaySettings: info.displaySettings,
     createdAt,
-    updatedAt: row.updatedAt || null
+    updatedAt,
+    recommendationScore: calculateKitchenRecommendationScore({
+      info,
+      dishCount,
+      categories,
+      dishes,
+      updatedAt
+    })
   };
 }
 
@@ -1470,7 +1517,8 @@ app.get('/api/kitchens/public-search', asyncHandler(async (req, res) => {
   const kitchens = await Kitchen.findAll(queryOptions);
 
   const summaries = (await Promise.all(kitchens.map(toClientKitchenSummary)))
-    .filter(kitchen => kitchen.isPublic);
+    .filter(kitchen => kitchen.isPublic)
+    .sort(compareKitchenRecommendation);
   const ownerIds = Array.from(new Set(summaries.map(kitchen => kitchen.ownerUserId).filter(Boolean)));
   const users = ownerIds.length
     ? await User.findAll({
