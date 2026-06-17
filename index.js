@@ -2023,6 +2023,85 @@ app.get('/api/dishes/public-feed', asyncHandler(async (req, res) => {
   });
 }));
 
+app.get('/api/dishes/public-detail', asyncHandler(async (req, res) => {
+  const kitchenId = String((req.query && req.query.kitchenId) || '').trim();
+  const dishId = String((req.query && req.query.dishId) || '').trim();
+
+  if (!kitchenId || !dishId) {
+    res.status(400).send({ ok: false, error: 'Invalid query', message: '菜谱参数缺失' });
+    return;
+  }
+
+  const kitchen = await findKitchenByIdOrLegacy(kitchenId);
+  if (!kitchen) {
+    res.status(404).send({ ok: false, error: 'Kitchen not found', message: '厨房不存在' });
+    return;
+  }
+
+  const summary = await toClientKitchenSummary(kitchen);
+  if (!summary.isPublic) {
+    res.status(403).send({ ok: false, error: 'Kitchen private', message: '该厨房未公开' });
+    return;
+  }
+
+  const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const kitchenInfo = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
+  const displaySettings = summary.displaySettings || kitchenInfo.displaySettings || {};
+  const dish = normalizeDishList(row.dishes).find(item => (
+    item && item.isPublic && String(item.id || '') === dishId
+  ));
+
+  if (!dish) {
+    res.status(404).send({ ok: false, error: 'Dish not found', message: '公开菜谱不存在' });
+    return;
+  }
+
+  const owner = row.ownerUserId
+    ? await User.findByPk(row.ownerUserId, { attributes: ['id', 'nickname', 'avatar'] })
+    : null;
+  const ownerRow = owner && owner.toJSON ? owner.toJSON() : (owner || {});
+
+  res.send({
+    dish: {
+      id: `${row.id}::${String(dish.id || '')}`,
+      dishId: String(dish.id || ''),
+      kitchenId: row.id,
+      kitchenCode: summary.kitchenCode || '',
+      kitchenName: summary.name || '未命名厨房',
+      kitchenLogo: summary.logo || '',
+      ownerUserId: row.ownerUserId || '',
+      ownerNickname: ownerRow.nickname || '',
+      ownerAvatar: ownerRow.avatar || '',
+      name: dish.name || '未命名菜谱',
+      category: String(dish.category || '').trim() || '未分类',
+      desc: String(dish.desc || '').trim(),
+      image: dish.image || '',
+      subImages: Array.isArray(dish.subImages) ? dish.subImages : [],
+      price: dish.price !== undefined && dish.price !== null ? dish.price : '0.00',
+      stars: Number(dish.stars || 5),
+      sales: Number(dish.sales || 0),
+      stock: dish.stock !== undefined && dish.stock !== null ? dish.stock : 999,
+      isRequired: !!dish.isRequired,
+      ingredients: Array.isArray(dish.ingredients) ? dish.ingredients : [],
+      steps: Array.isArray(dish.steps) ? dish.steps : [],
+      duration: String(dish.duration || '').trim(),
+      difficulty: String(dish.difficulty || '').trim(),
+      cookware: String(dish.cookware || '').trim(),
+      portion: String(dish.portion || '').trim(),
+      unit: String(dish.unit || '').trim(),
+      calories: dish.calories !== undefined && dish.calories !== null ? String(dish.calories).trim() : '',
+      protein: dish.protein !== undefined && dish.protein !== null ? String(dish.protein).trim() : '',
+      carbs: dish.carbs !== undefined && dish.carbs !== null ? String(dish.carbs).trim() : '',
+      fat: dish.fat !== undefined && dish.fat !== null ? String(dish.fat).trim() : '',
+      tags: Array.isArray(dish.tags) ? dish.tags : [],
+      specs: Array.isArray(dish.specs) ? dish.specs : [],
+      displaySettings,
+      updatedAt: dish.updatedAt || row.updatedAt || null,
+      createdAt: dish.createdAt || row.createdAt || null
+    }
+  });
+}));
+
 app.post('/api/kitchens/:id/steal-dish', asyncHandler(async (req, res) => {
   const sourceKitchenId = String(req.params.id || '').trim();
   const body = req.body || {};
