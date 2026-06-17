@@ -716,6 +716,19 @@ function normalizeStolenDishRecords(records) {
   }, []);
 }
 
+function buildStolenDishCountMap(kitchens = []) {
+  return (Array.isArray(kitchens) ? kitchens : []).reduce((result, kitchen) => {
+    const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : (kitchen || {});
+    const info = parseJson(row.kitchenInfo, {});
+    const stolenRecords = normalizeStolenDishRecords(info.stolenDishes);
+    stolenRecords.forEach(record => {
+      const key = makeStolenDishKey(record.sourceKitchenId, record.sourceDishId);
+      result[key] = (result[key] || 0) + 1;
+    });
+    return result;
+  }, {});
+}
+
 function stealDishForKitchen(dish, targetCategory, meta = {}) {
   const sourceDishId = String(dish && dish.id !== undefined ? dish.id : '').trim();
   return {
@@ -2082,6 +2095,7 @@ app.get('/api/dishes/public-feed', asyncHandler(async (req, res) => {
   }, {});
 
   const feed = [];
+  const stolenDishCountMap = buildStolenDishCountMap(publicKitchens.map(kitchen => kitchen.rawRow || kitchen));
 
   publicKitchens
     .filter(kitchen => kitchen.isPublic)
@@ -2101,6 +2115,7 @@ app.get('/api/dishes/public-feed', asyncHandler(async (req, res) => {
       const owner = userMap[String(kitchen.ownerUserId)] || {};
 
       dishes.forEach(dish => {
+        const stealCount = stolenDishCountMap[makeStolenDishKey(kitchen.id, dish.id)] || 0;
         feed.push({
           id: `${kitchen.id}::${String(dish.id || '')}`,
           kitchenId: kitchen.id,
@@ -2121,6 +2136,7 @@ app.get('/api/dishes/public-feed', asyncHandler(async (req, res) => {
           tags: Array.isArray(dish.tags) ? dish.tags : [],
           isPublic: true,
           kitchenIsPublic: true,
+          stealCount: Number(stealCount || 0),
           displaySettings,
           updatedAt: dish.updatedAt || kitchen.updatedAt || null,
           createdAt: dish.createdAt || kitchen.createdAt || null
@@ -2170,6 +2186,12 @@ app.get('/api/dishes/public-detail', asyncHandler(async (req, res) => {
   const dish = normalizeDishList(row.dishes).find(item => (
     item && item.isPublic && String(item.id || '') === dishId
   ));
+  const stolenDishCountMap = buildStolenDishCountMap(await Kitchen.findAll({
+    attributes: ['id', 'kitchenInfo'],
+    where: {
+      dissolvedAt: null
+    }
+  }));
 
   if (!dish) {
     res.status(404).send({ ok: false, error: 'Dish not found', message: '公开菜谱不存在' });
@@ -2200,6 +2222,7 @@ app.get('/api/dishes/public-detail', asyncHandler(async (req, res) => {
       price: dish.price !== undefined && dish.price !== null ? dish.price : '0.00',
       stars: Number(dish.stars || 5),
       sales: Number(dish.sales || 0),
+      stealCount: Number(stolenDishCountMap[makeStolenDishKey(row.id, dishId)] || 0),
       stock: dish.stock !== undefined && dish.stock !== null ? dish.stock : 999,
       isRequired: !!dish.isRequired,
       ingredients: Array.isArray(dish.ingredients) ? dish.ingredients : [],
