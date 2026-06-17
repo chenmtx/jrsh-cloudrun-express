@@ -173,8 +173,109 @@ function toClientUser(user) {
   const cabbageBalance = formatCabbageNumberText(row.cabbageBalance, 2200.00);
   return {
     ...row,
+    signState: ensureMonthlySignState(row),
     cabbageBalance,
     cabbageHistory: parseUserCabbageHistory(row, cabbageBalance)
+  };
+}
+
+function makeMonthlySignKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+}
+
+function getMonthlySignReward(monthKey = makeMonthlySignKey(), dayIndex = 1) {
+  const safeDay = Math.max(1, Math.min(30, Number(dayIndex) || 1));
+  const text = `${String(monthKey || '').trim()}-${safeDay}`;
+  let seed = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    seed = (seed * 31 + text.charCodeAt(i)) % 501;
+  }
+  return 1000 + seed;
+}
+
+function getCurrentMonthlySignDay(date = new Date()) {
+  const day = Number(date && date.getDate ? date.getDate() : 0) || 0;
+  return day >= 1 && day <= 30 ? day : 0;
+}
+
+function normalizeSignState(rawState = {}) {
+  const state = typeof rawState === 'string'
+    ? parseJson(rawState, {})
+    : (rawState && typeof rawState === 'object' ? rawState : {});
+  const monthKey = String(state.monthKey || '').trim();
+  const dayItems = Array.isArray(state.days)
+    ? state.days
+    : Object.keys(state.days && typeof state.days === 'object' ? state.days : {}).map(key => {
+        const item = state.days[key];
+        if (item && typeof item === 'object') {
+          return {
+            ...item,
+            day: item.day !== undefined ? item.day : key
+          };
+        }
+        return { day: key };
+      });
+  const days = dayItems.reduce((result, item) => {
+    if (!item || typeof item !== 'object') return result;
+    const day = Math.max(1, Math.min(30, Number(item.day) || 0));
+    if (!day) return result;
+    result[String(day)] = {
+      day,
+      reward: Number(item.reward) || getMonthlySignReward(monthKey, day),
+      signed: !!item.signed,
+      signedAt: String(item.signedAt || ''),
+      canSign: !!item.canSign
+    };
+    return result;
+  }, {});
+  return {
+    monthKey,
+    days
+  };
+}
+
+function buildDefaultMonthlySignState(monthKey = makeMonthlySignKey()) {
+  const currentDay = getCurrentMonthlySignDay();
+  const days = {};
+  for (let i = 1; i <= 30; i += 1) {
+    days[String(i)] = {
+      day: i,
+      reward: getMonthlySignReward(monthKey, i),
+      signed: false,
+      signedAt: '',
+      canSign: currentDay > 0 && i === currentDay
+    };
+  }
+  return {
+    monthKey,
+    days
+  };
+}
+
+function ensureMonthlySignState(user) {
+  const row = user && user.toJSON ? user.toJSON() : (user || {});
+  const currentMonthKey = makeMonthlySignKey();
+  const normalized = normalizeSignState(row.signState);
+  const sourceDays = normalized.monthKey === currentMonthKey ? normalized.days : {};
+  const currentDay = getCurrentMonthlySignDay();
+  const days = {};
+  for (let i = 1; i <= 30; i += 1) {
+    const key = String(i);
+    const existing = sourceDays[key] || {};
+    days[key] = {
+      day: i,
+      reward: Number(existing.reward) || getMonthlySignReward(currentMonthKey, i),
+      signed: !!existing.signed,
+      signedAt: String(existing.signedAt || ''),
+      canSign: currentDay > 0 && i === currentDay && !existing.signed
+    };
+  }
+
+  return {
+    monthKey: currentMonthKey,
+    days
   };
 }
 
@@ -982,6 +1083,7 @@ async function migrateLegacyUser(legacyUser, loginKey) {
   if (!legacyUser || isNumericUserId(legacyUser.id)) return legacyUser;
 
   const cabbageBalance = legacyUser.cabbageBalance !== undefined ? legacyUser.cabbageBalance : 2200.00;
+  const signState = ensureMonthlySignState(legacyUser);
   const numericId = await makeNumericUserId();
   const migrated = await User.create({
     id: numericId,
@@ -990,7 +1092,8 @@ async function migrateLegacyUser(legacyUser, loginKey) {
     avatar: legacyUser.avatar || '',
     defaultOrderNote: legacyUser.defaultOrderNote || '',
     cabbageBalance,
-    cabbageHistory: stringifyJson(parseUserCabbageHistory(legacyUser, cabbageBalance), [])
+    cabbageHistory: stringifyJson(parseUserCabbageHistory(legacyUser, cabbageBalance), []),
+    signState: stringifyJson(signState, {})
   });
 
   await Kitchen.update(
@@ -1058,10 +1161,13 @@ async function upsertUser(req, body = {}) {
   const currentCabbageBalance = current && current.cabbageBalance;
   const incomingCabbageHistory = normalizeCabbageHistory(body.cabbageHistory, incomingCabbageBalance);
   const currentCabbageHistory = current ? parseUserCabbageHistory(current, currentCabbageBalance) : [];
+  const incomingSignState = normalizeSignState(body.signState);
+  const currentSignState = current ? ensureMonthlySignState(current) : buildDefaultMonthlySignState();
   const persistedCabbageBalance = current ? formatCabbageNumber(currentCabbageBalance, 2200.00) : incomingCabbageBalance;
   const persistedCabbageHistory = current
     ? (currentCabbageHistory.length > 0 ? currentCabbageHistory : makeDefaultCabbageHistory(persistedCabbageBalance))
     : incomingCabbageHistory;
+  const persistedSignState = current ? currentSignState : (Object.keys(incomingSignState.days || {}).length ? incomingSignState : buildDefaultMonthlySignState());
 
   const next = {
     id: current ? current.id : await makeNumericUserId(),
@@ -1076,7 +1182,8 @@ async function upsertUser(req, body = {}) {
     // Existing users treat the database as the source of truth for cabbage data.
     // Login/bootstrap must not overwrite remote balance with local default 2200 after cache clear.
     cabbageBalance: persistedCabbageBalance,
-    cabbageHistory: stringifyJson(persistedCabbageHistory, [])
+    cabbageHistory: stringifyJson(persistedCabbageHistory, []),
+    signState: stringifyJson(persistedSignState, {})
   };
 
   if (current) {
@@ -1369,6 +1476,99 @@ app.get('/api/users/:id/cabbage', asyncHandler(async (req, res) => {
     userId: current.id,
     balance: current.cabbageBalance,
     history: current.cabbageHistory
+  });
+}));
+
+app.get('/api/users/:id/sign-state', asyncHandler(async (req, res) => {
+  const user = await findUserByIdOrLoginKey(req.params.id);
+  if (!user) {
+    res.status(404).send({ error: 'User not found' });
+    return;
+  }
+
+  const current = await toClientUserWithDecoratedHistory(user);
+  const signState = ensureMonthlySignState(current);
+  res.send({
+    userId: current.id,
+    signState
+  });
+}));
+
+app.post('/api/users/:id/sign-in', asyncHandler(async (req, res) => {
+  const user = await findUserByIdOrLoginKey(req.params.id);
+  if (!user) {
+    res.status(404).send({ ok: false, error: 'User not found', message: '用户不存在' });
+    return;
+  }
+
+  const result = await sequelize.transaction(async transaction => {
+    const lockedUser = await User.findByPk((user.toJSON ? user.toJSON() : user).id, { transaction, lock: true });
+    if (!lockedUser) {
+      return { status: 404, payload: { ok: false, error: 'User not found', message: '用户不存在' } };
+    }
+
+    const row = lockedUser.toJSON ? lockedUser.toJSON() : lockedUser;
+    const signState = ensureMonthlySignState(row);
+    const currentMonthKey = makeMonthlySignKey();
+    if (signState.monthKey !== currentMonthKey) {
+      return { status: 409, payload: { ok: false, error: 'Sign state expired', message: '签到状态已过期，请重试' } };
+    }
+
+    const safeToday = getCurrentMonthlySignDay();
+    if (!safeToday) {
+      return { status: 409, payload: { ok: false, error: 'Sign day invalid', message: '本月签到已结束，请下月再来' } };
+    }
+    const todayEntry = signState.days[String(safeToday)];
+    if (!todayEntry) {
+      return { status: 409, payload: { ok: false, error: 'Sign day invalid', message: '今日签到不可用' } };
+    }
+    if (todayEntry.signed) {
+      return { status: 409, payload: { ok: false, error: 'Already signed', message: '今天已经签到过了' } };
+    }
+    if (!todayEntry.canSign) {
+      return { status: 409, payload: { ok: false, error: 'Cannot sign today', message: '当前还不能签到今天' } };
+    }
+
+    const reward = Number(todayEntry.reward) || getMonthlySignReward(currentMonthKey, safeToday);
+    const currentBalance = formatCabbageNumber(row.cabbageBalance, 2200.00);
+    const nextBalance = formatCabbageNumber(currentBalance + reward, 0);
+    const currentHistory = parseUserCabbageHistory(row, currentBalance);
+    const nextHistory = [
+      makeCabbageHistoryEntry('add', reward, `每日签到(${currentMonthKey}-第${safeToday}天)`, nextBalance),
+      ...currentHistory
+    ];
+
+    signState.days[String(safeToday)] = {
+      ...todayEntry,
+      signed: true,
+      canSign: false,
+      signedAt: new Date().toISOString()
+    };
+
+    await lockedUser.update({
+      cabbageBalance: nextBalance,
+      cabbageHistory: stringifyJson(nextHistory, []),
+      signState: stringifyJson(signState, {})
+    }, { transaction });
+
+    return {
+      status: 200,
+      reward,
+      userId: row.id
+    };
+  });
+
+  if (!result || result.status !== 200) {
+    const failure = result || { status: 500, payload: { ok: false, error: 'Sign in failed', message: '签到失败' } };
+    res.status(failure.status).send(failure.payload);
+    return;
+  }
+
+  const refreshedUser = await User.findByPk(result.userId);
+  res.send({
+    ok: true,
+    reward: formatCabbageNumberText(result.reward, 0),
+    user: await toClientUserWithDecoratedHistory(refreshedUser)
   });
 }));
 
