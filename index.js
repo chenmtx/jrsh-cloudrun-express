@@ -195,6 +195,21 @@ function getMonthlySignReward(monthKey = makeMonthlySignKey(), dayIndex = 1) {
   return 1000 + seed;
 }
 
+function getMonthlySignAction(dayIndex = 1, signed = false, date = new Date()) {
+  const safeDay = Math.max(1, Math.min(30, Number(dayIndex) || 1));
+  const currentDay = Number(date && date.getDate ? date.getDate() : 0) || 0;
+  if (signed) {
+    return {
+      canSign: false,
+      canMakeUp: false
+    };
+  }
+  return {
+    canSign: currentDay >= 1 && currentDay <= 30 && safeDay === currentDay,
+    canMakeUp: safeDay < currentDay
+  };
+}
+
 function getCurrentMonthlySignDay(date = new Date()) {
   const day = Number(date && date.getDate ? date.getDate() : 0) || 0;
   return day >= 1 && day <= 30 ? day : 0;
@@ -226,7 +241,8 @@ function normalizeSignState(rawState = {}) {
       reward: Number(item.reward) || getMonthlySignReward(monthKey, day),
       signed: !!item.signed,
       signedAt: String(item.signedAt || ''),
-      canSign: !!item.canSign
+      canSign: !!item.canSign,
+      canMakeUp: !!item.canMakeUp
     };
     return result;
   }, {});
@@ -237,15 +253,16 @@ function normalizeSignState(rawState = {}) {
 }
 
 function buildDefaultMonthlySignState(monthKey = makeMonthlySignKey()) {
-  const currentDay = getCurrentMonthlySignDay();
   const days = {};
   for (let i = 1; i <= 30; i += 1) {
+    const action = getMonthlySignAction(i, false);
     days[String(i)] = {
       day: i,
       reward: getMonthlySignReward(monthKey, i),
       signed: false,
       signedAt: '',
-      canSign: currentDay > 0 && i === currentDay
+      canSign: action.canSign,
+      canMakeUp: action.canMakeUp
     };
   }
   return {
@@ -259,17 +276,19 @@ function ensureMonthlySignState(user) {
   const currentMonthKey = makeMonthlySignKey();
   const normalized = normalizeSignState(row.signState);
   const sourceDays = normalized.monthKey === currentMonthKey ? normalized.days : {};
-  const currentDay = getCurrentMonthlySignDay();
   const days = {};
   for (let i = 1; i <= 30; i += 1) {
     const key = String(i);
     const existing = sourceDays[key] || {};
+    const signed = !!existing.signed;
+    const action = getMonthlySignAction(i, signed);
     days[key] = {
       day: i,
       reward: Number(existing.reward) || getMonthlySignReward(currentMonthKey, i),
-      signed: !!existing.signed,
+      signed,
       signedAt: String(existing.signedAt || ''),
-      canSign: currentDay > 0 && i === currentDay && !existing.signed
+      canSign: action.canSign,
+      canMakeUp: action.canMakeUp
     };
   }
 
@@ -1514,34 +1533,52 @@ app.post('/api/users/:id/sign-in', asyncHandler(async (req, res) => {
       return { status: 409, payload: { ok: false, error: 'Sign state expired', message: '签到状态已过期，请重试' } };
     }
 
-    const safeToday = getCurrentMonthlySignDay();
-    if (!safeToday) {
-      return { status: 409, payload: { ok: false, error: 'Sign day invalid', message: '本月签到已结束，请下月再来' } };
-    }
-    const todayEntry = signState.days[String(safeToday)];
-    if (!todayEntry) {
-      return { status: 409, payload: { ok: false, error: 'Sign day invalid', message: '今日签到不可用' } };
-    }
-    if (todayEntry.signed) {
-      return { status: 409, payload: { ok: false, error: 'Already signed', message: '今天已经签到过了' } };
-    }
-    if (!todayEntry.canSign) {
-      return { status: 409, payload: { ok: false, error: 'Cannot sign today', message: '当前还不能签到今天' } };
+    const body = req.body || {};
+    const requestedDay = Object.prototype.hasOwnProperty.call(body, 'day')
+      ? parseInt(body.day, 10)
+      : parseInt(new Date().getDate(), 10);
+    if (!Number.isFinite(requestedDay) || requestedDay < 1 || requestedDay > 30) {
+      return { status: 409, payload: { ok: false, error: 'Sign day invalid', message: '签到日期无效' } };
     }
 
-    const reward = Number(todayEntry.reward) || getMonthlySignReward(currentMonthKey, safeToday);
+    const targetEntry = signState.days[String(requestedDay)];
+    if (!targetEntry) {
+      return { status: 409, payload: { ok: false, error: 'Sign day invalid', message: '该签到日期不可用' } };
+    }
+    if (targetEntry.signed) {
+      return { status: 409, payload: { ok: false, error: 'Already signed', message: '这一天已经签到过了' } };
+    }
+
+    const action = getMonthlySignAction(requestedDay, false);
+    if (!action.canSign && !action.canMakeUp) {
+      return { status: 409, payload: { ok: false, error: 'Cannot sign day', message: '还未到该签到日期' } };
+    }
+
+    const makeUpCost = action.canMakeUp ? 200 : 0;
+    const reward = Number(targetEntry.reward) || getMonthlySignReward(currentMonthKey, requestedDay);
     const currentBalance = formatCabbageNumber(row.cabbageBalance, 2200.00);
-    const nextBalance = formatCabbageNumber(currentBalance + reward, 0);
+    if (makeUpCost > 0 && currentBalance < makeUpCost) {
+      return { status: 409, payload: { ok: false, error: 'Insufficient balance', message: '大白菜不足，补签需要 200 大白菜' } };
+    }
+    const balanceAfterCost = formatCabbageNumber(currentBalance - makeUpCost, 0);
+    const nextBalance = formatCabbageNumber(balanceAfterCost + reward, 0);
     const currentHistory = parseUserCabbageHistory(row, currentBalance);
-    const nextHistory = [
-      makeCabbageHistoryEntry('add', reward, `每日签到(${currentMonthKey}-第${safeToday}天)`, nextBalance),
-      ...currentHistory
-    ];
+    const nextHistory = makeUpCost > 0
+      ? [
+          makeCabbageHistoryEntry('add', reward, `补签奖励(${currentMonthKey}-第${requestedDay}天)`, nextBalance),
+          makeCabbageHistoryEntry('sub', makeUpCost, `补签消耗(${currentMonthKey}-第${requestedDay}天)`, balanceAfterCost),
+          ...currentHistory
+        ]
+      : [
+          makeCabbageHistoryEntry('add', reward, `每日签到(${currentMonthKey}-第${requestedDay}天)`, nextBalance),
+          ...currentHistory
+        ];
 
-    signState.days[String(safeToday)] = {
-      ...todayEntry,
+    signState.days[String(requestedDay)] = {
+      ...targetEntry,
       signed: true,
       canSign: false,
+      canMakeUp: false,
       signedAt: new Date().toISOString()
     };
 
@@ -1553,6 +1590,9 @@ app.post('/api/users/:id/sign-in', asyncHandler(async (req, res) => {
 
     return {
       status: 200,
+      mode: makeUpCost > 0 ? 'makeup' : 'sign',
+      day: requestedDay,
+      cost: makeUpCost,
       reward,
       userId: row.id
     };
@@ -1567,6 +1607,9 @@ app.post('/api/users/:id/sign-in', asyncHandler(async (req, res) => {
   const refreshedUser = await User.findByPk(result.userId);
   res.send({
     ok: true,
+    mode: result.mode,
+    day: result.day,
+    cost: formatCabbageNumberText(result.cost, 0),
     reward: formatCabbageNumberText(result.reward, 0),
     user: await toClientUserWithDecoratedHistory(refreshedUser)
   });
