@@ -1528,6 +1528,61 @@ app.post('/api/orders/:id', asyncHandler(async (req, res) => {
   res.send({ order: toClientOrder(current) });
 }));
 
+app.delete('/api/orders/:id', asyncHandler(async (req, res) => {
+  const orderId = String(req.params.id || '').trim();
+  const body = req.body || {};
+  const operatorUserId = String(body.userId || body.clientUserId || getRequestUserId(req, body) || '').trim();
+  if (!orderId || !operatorUserId) {
+    res.status(400).send({ ok: false, error: 'Invalid request', message: '订单参数缺失' });
+    return;
+  }
+
+  const operator = await findUserByIdOrLoginKey(operatorUserId);
+  if (!operator) {
+    res.status(404).send({ ok: false, error: 'User not found', message: '用户不存在' });
+    return;
+  }
+
+  const current = await Order.findOne({ where: { id: orderId } });
+  if (!current) {
+    res.status(404).send({ ok: false, error: 'Order not found', message: '订单不存在' });
+    return;
+  }
+
+  const row = current.toJSON ? current.toJSON() : current;
+  const payload = parseJson(row.payload, {});
+  const buyerUserId = String(payload.userId || row.ownerUserId || '').trim();
+  const merchantUserId = String(payload.merchantUserId || payload.kitchenOwnerUserId || '').trim();
+  const isBuyer = buyerUserId && buyerUserId === String(operator.id);
+  const isMerchant = merchantUserId && merchantUserId === String(operator.id);
+
+  if (!isBuyer && !isMerchant) {
+    res.status(403).send({ ok: false, error: 'Forbidden', message: '只能删除自己的订单记录' });
+    return;
+  }
+
+  const status = String(payload.status || row.status || '').trim();
+  if (status !== 'completed' && status !== 'cancelled') {
+    res.status(409).send({ ok: false, error: 'Order active', message: '请先完成或取消订单' });
+    return;
+  }
+
+  const kitchen = await findKitchenByIdOrLegacy(row.kitchenId);
+  if (kitchen) {
+    const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+    const legacyOrders = normalizeOrderList(kitchenRow.orders).filter(item => String(item.id || '') !== orderId);
+    await kitchen.update({
+      orders: stringifyJson(legacyOrders, [])
+    });
+  }
+
+  await current.destroy();
+  res.send({
+    ok: true,
+    deletedOrderId: orderId
+  });
+}));
+
 app.post('/api/users/:id/profile', asyncHandler(async (req, res) => {
   const user = await updateUserProfileById(req.params.id, req.body || {});
   res.send({
