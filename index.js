@@ -1927,6 +1927,108 @@ app.get('/api/kitchens/public-search', asyncHandler(async (req, res) => {
   });
 }));
 
+app.get('/api/dishes/public-feed', asyncHandler(async (req, res) => {
+  const keyword = String((req.query && req.query.keyword) || '').trim().slice(0, 32).toLowerCase();
+  const kitchens = await Kitchen.findAll({
+    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenCode', 'kitchenInfo', 'dishes', 'isPublic', 'displaySettings', 'createdAt', 'updatedAt', 'dissolvedAt'],
+    where: {
+      dissolvedAt: null
+    },
+    order: [['updatedAt', 'DESC']]
+  });
+
+  const publicKitchens = await Promise.all(kitchens.map(async kitchen => {
+    const summary = await toClientKitchenSummary(kitchen);
+    const row = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+    const info = normalizeKitchenInfo(row.id, parseJson(row.kitchenInfo, {}), row);
+    return {
+      ...summary,
+      kitchenInfo: info,
+      rawRow: row
+    };
+  }));
+
+  const ownerIds = Array.from(new Set(publicKitchens.map(kitchen => kitchen.ownerUserId).filter(Boolean)));
+  const users = ownerIds.length
+    ? await User.findAll({
+        attributes: ['id', 'nickname', 'avatar'],
+        where: { id: { [Op.in]: ownerIds } }
+      })
+    : [];
+  const userMap = users.reduce((map, user) => {
+    const row = user.toJSON ? user.toJSON() : user;
+    map[String(row.id)] = row;
+    return map;
+  }, {});
+
+  const feed = [];
+
+  publicKitchens
+    .filter(kitchen => kitchen.isPublic)
+    .sort(compareKitchenRecommendation)
+    .forEach(kitchen => {
+      const sourceRow = kitchen.rawRow || {};
+      const kitchenInfo = kitchen.kitchenInfo || {};
+      const dishes = normalizeDishList(sourceRow.dishes)
+        .filter(dish => dish && dish.isPublic)
+        .filter(dish => {
+          if (!keyword) return true;
+          const name = String(dish.name || '').toLowerCase();
+          const desc = String(dish.desc || '').toLowerCase();
+          const tags = Array.isArray(dish.tags) ? dish.tags.join(' ').toLowerCase() : '';
+          const category = String(dish.category || '').toLowerCase();
+          return name.includes(keyword)
+            || desc.includes(keyword)
+            || tags.includes(keyword)
+            || category.includes(keyword);
+        });
+
+      const displaySettings = kitchen.displaySettings || kitchenInfo.displaySettings || {};
+      const owner = userMap[String(kitchen.ownerUserId)] || {};
+
+      dishes.forEach(dish => {
+        feed.push({
+          id: `${kitchen.id}::${String(dish.id || '')}`,
+          kitchenId: kitchen.id,
+          kitchenCode: kitchen.kitchenCode || '',
+          kitchenName: kitchen.name || '未命名厨房',
+          ownerUserId: kitchen.ownerUserId || '',
+          ownerNickname: owner.nickname || '',
+          ownerAvatar: owner.avatar || '',
+          kitchenLogo: kitchen.logo || '',
+          dishId: String(dish.id || ''),
+          name: dish.name || '未命名菜谱',
+          image: dish.image || '',
+          desc: String(dish.desc || '').trim(),
+          price: dish.price !== undefined && dish.price !== null ? dish.price : '0.00',
+          stars: Number(dish.stars || 5),
+          sales: Number(dish.sales || 0),
+          category: String(dish.category || '').trim() || '未分类',
+          tags: Array.isArray(dish.tags) ? dish.tags : [],
+          isPublic: true,
+          kitchenIsPublic: true,
+          displaySettings,
+          updatedAt: dish.updatedAt || kitchen.updatedAt || null,
+          createdAt: dish.createdAt || kitchen.createdAt || null
+        });
+      });
+    });
+
+  feed.sort((left, right) => {
+    const starDiff = Number(right.stars || 0) - Number(left.stars || 0);
+    if (starDiff !== 0) return starDiff;
+    const salesDiff = Number(right.sales || 0) - Number(left.sales || 0);
+    if (salesDiff !== 0) return salesDiff;
+    const rightTime = new Date(right.updatedAt || right.createdAt || 0).getTime();
+    const leftTime = new Date(left.updatedAt || left.createdAt || 0).getTime();
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  });
+
+  res.send({
+    dishes: feed.slice(0, keyword ? 100 : 200)
+  });
+}));
+
 app.post('/api/kitchens/:id/steal-dish', asyncHandler(async (req, res) => {
   const sourceKitchenId = String(req.params.id || '').trim();
   const body = req.body || {};
