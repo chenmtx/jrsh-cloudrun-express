@@ -681,6 +681,8 @@ function cloneDishForKitchen(dish) {
   return {
     ...(dish || {}),
     id: makeId('dish'),
+    stock: 999,
+    limit: '',
     status: 'available',
     isPublic: false,
     isRequired: false,
@@ -738,6 +740,8 @@ function stealDishForKitchen(dish, targetCategory, meta = {}) {
     ...(dish || {}),
     id: meta.targetDishId || makeId('dish'),
     category: targetCategory || '未分类',
+    stock: 999,
+    limit: '',
     status: 'available',
     isPublic: false,
     isRequired: false,
