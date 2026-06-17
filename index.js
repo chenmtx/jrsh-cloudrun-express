@@ -185,6 +185,12 @@ function makeMonthlySignKey(date = new Date()) {
   return `${year}-${month}`;
 }
 
+const MONTHLY_SIGN_TASK_REWARDS = {
+  7: 18888,
+  15: 38888,
+  30: 88888
+};
+
 function getMonthlySignReward(monthKey = makeMonthlySignKey(), dayIndex = 1) {
   const safeDay = Math.max(1, Math.min(30, Number(dayIndex) || 1));
   const text = `${String(monthKey || '').trim()}-${safeDay}`;
@@ -213,6 +219,11 @@ function getMonthlySignAction(dayIndex = 1, signed = false, date = new Date()) {
 function getCurrentMonthlySignDay(date = new Date()) {
   const day = Number(date && date.getDate ? date.getDate() : 0) || 0;
   return day >= 1 && day <= 30 ? day : 0;
+}
+
+function countSignedDays(signState = {}) {
+  const days = signState && signState.days && typeof signState.days === 'object' ? signState.days : {};
+  return Object.keys(days).reduce((count, key) => count + (days[key] && days[key].signed ? 1 : 0), 0);
 }
 
 function normalizeSignState(rawState = {}) {
@@ -258,6 +269,17 @@ function normalizeSignState(rawState = {}) {
       }))
       .filter(log => log.day && log.signedAt)
   };
+  normalized.claimedRewards = Object.keys(MONTHLY_SIGN_TASK_REWARDS).reduce((result, key) => {
+    const item = state.claimedRewards && typeof state.claimedRewards === 'object' ? state.claimedRewards[key] : null;
+    result[String(key)] = {
+      milestone: Number(key),
+      claimed: !!(item && item.claimed),
+      claimedAt: String((item && item.claimedAt) || ''),
+      reward: formatCabbageNumberText((item && item.reward) || MONTHLY_SIGN_TASK_REWARDS[key], 0)
+    };
+    return result;
+  }, {});
+  return normalized;
 }
 
 function buildDefaultMonthlySignState(monthKey = makeMonthlySignKey()) {
@@ -276,7 +298,16 @@ function buildDefaultMonthlySignState(monthKey = makeMonthlySignKey()) {
   return {
     monthKey,
     days,
-    makeUpLogs: []
+    makeUpLogs: [],
+    claimedRewards: Object.keys(MONTHLY_SIGN_TASK_REWARDS).reduce((result, key) => {
+      result[String(key)] = {
+        milestone: Number(key),
+        claimed: false,
+        claimedAt: '',
+        reward: formatCabbageNumberText(MONTHLY_SIGN_TASK_REWARDS[key], 0)
+      };
+      return result;
+    }, {})
   };
 }
 
@@ -286,6 +317,7 @@ function ensureMonthlySignState(user) {
   const normalized = normalizeSignState(row.signState);
   const sourceDays = normalized.monthKey === currentMonthKey ? normalized.days : {};
   const makeUpLogs = normalized.monthKey === currentMonthKey ? normalized.makeUpLogs : [];
+  const claimedRewards = normalized.monthKey === currentMonthKey ? normalized.claimedRewards : {};
   const days = {};
   for (let i = 1; i <= 30; i += 1) {
     const key = String(i);
@@ -305,7 +337,17 @@ function ensureMonthlySignState(user) {
   return {
     monthKey: currentMonthKey,
     days,
-    makeUpLogs
+    makeUpLogs,
+    claimedRewards: Object.keys(MONTHLY_SIGN_TASK_REWARDS).reduce((result, key) => {
+      const item = claimedRewards && claimedRewards[key] ? claimedRewards[key] : {};
+      result[String(key)] = {
+        milestone: Number(key),
+        claimed: !!item.claimed,
+        claimedAt: String(item.claimedAt || ''),
+        reward: formatCabbageNumberText(item.reward || MONTHLY_SIGN_TASK_REWARDS[key], 0)
+      };
+      return result;
+    }, {})
   };
 }
 
@@ -1633,6 +1675,84 @@ app.post('/api/users/:id/sign-in', asyncHandler(async (req, res) => {
     mode: result.mode,
     day: result.day,
     cost: formatCabbageNumberText(result.cost, 0),
+    reward: formatCabbageNumberText(result.reward, 0),
+    user: await toClientUserWithDecoratedHistory(refreshedUser)
+  });
+}));
+
+app.post('/api/users/:id/sign-task-reward', asyncHandler(async (req, res) => {
+  const user = await findUserByIdOrLoginKey(req.params.id);
+  if (!user) {
+    res.status(404).send({ ok: false, error: 'User not found', message: '用户不存在' });
+    return;
+  }
+
+  const result = await sequelize.transaction(async transaction => {
+    const lockedUser = await User.findByPk((user.toJSON ? user.toJSON() : user).id, { transaction, lock: true });
+    if (!lockedUser) {
+      return { status: 404, payload: { ok: false, error: 'User not found', message: '用户不存在' } };
+    }
+
+    const body = req.body || {};
+    const milestone = parseInt(body.milestone, 10);
+    const rewardAmount = MONTHLY_SIGN_TASK_REWARDS[milestone];
+    if (!rewardAmount) {
+      return { status: 409, payload: { ok: false, error: 'Invalid milestone', message: '签到任务无效' } };
+    }
+
+    const row = lockedUser.toJSON ? lockedUser.toJSON() : lockedUser;
+    const signState = ensureMonthlySignState(row);
+    const signedDays = countSignedDays(signState);
+    if (signedDays < milestone) {
+      return { status: 409, payload: { ok: false, error: 'Requirement not met', message: '累计签到天数不足，暂时不能领取' } };
+    }
+
+    const rewardState = signState.claimedRewards && signState.claimedRewards[String(milestone)]
+      ? signState.claimedRewards[String(milestone)]
+      : null;
+    if (rewardState && rewardState.claimed) {
+      return { status: 409, payload: { ok: false, error: 'Already claimed', message: '该签到奖励已经领取过了' } };
+    }
+
+    const currentBalance = formatCabbageNumber(row.cabbageBalance, 2200.00);
+    const nextBalance = formatCabbageNumber(currentBalance + rewardAmount, 0);
+    const currentHistory = parseUserCabbageHistory(row, currentBalance);
+    const nextHistory = [
+      makeCabbageHistoryEntry('add', rewardAmount, `累签${milestone}天奖励(${signState.monthKey})`, nextBalance),
+      ...currentHistory
+    ];
+
+    signState.claimedRewards[String(milestone)] = {
+      milestone,
+      claimed: true,
+      claimedAt: new Date().toISOString(),
+      reward: formatCabbageNumberText(rewardAmount, 0)
+    };
+
+    await lockedUser.update({
+      cabbageBalance: nextBalance,
+      cabbageHistory: stringifyJson(nextHistory, []),
+      signState: stringifyJson(signState, {})
+    }, { transaction });
+
+    return {
+      status: 200,
+      milestone,
+      reward: rewardAmount,
+      userId: row.id
+    };
+  });
+
+  if (!result || result.status !== 200) {
+    const failure = result || { status: 500, payload: { ok: false, error: 'Claim sign reward failed', message: '领取签到奖励失败' } };
+    res.status(failure.status).send(failure.payload);
+    return;
+  }
+
+  const refreshedUser = await User.findByPk(result.userId);
+  res.send({
+    ok: true,
+    milestone: result.milestone,
     reward: formatCabbageNumberText(result.reward, 0),
     user: await toClientUserWithDecoratedHistory(refreshedUser)
   });
