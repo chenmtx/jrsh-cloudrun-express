@@ -248,7 +248,15 @@ function normalizeSignState(rawState = {}) {
   }, {});
   return {
     monthKey,
-    days
+    days,
+    makeUpLogs: (Array.isArray(state.makeUpLogs) ? state.makeUpLogs : [])
+      .map(log => ({
+        day: Math.max(1, Math.min(30, Number(log && log.day) || 0)),
+        signedAt: String((log && log.signedAt) || ''),
+        cost: formatCabbageNumberText(log && log.cost, 0),
+        reward: formatCabbageNumberText(log && log.reward, 0)
+      }))
+      .filter(log => log.day && log.signedAt)
   };
 }
 
@@ -267,7 +275,8 @@ function buildDefaultMonthlySignState(monthKey = makeMonthlySignKey()) {
   }
   return {
     monthKey,
-    days
+    days,
+    makeUpLogs: []
   };
 }
 
@@ -276,6 +285,7 @@ function ensureMonthlySignState(user) {
   const currentMonthKey = makeMonthlySignKey();
   const normalized = normalizeSignState(row.signState);
   const sourceDays = normalized.monthKey === currentMonthKey ? normalized.days : {};
+  const makeUpLogs = normalized.monthKey === currentMonthKey ? normalized.makeUpLogs : [];
   const days = {};
   for (let i = 1; i <= 30; i += 1) {
     const key = String(i);
@@ -294,7 +304,8 @@ function ensureMonthlySignState(user) {
 
   return {
     monthKey: currentMonthKey,
-    days
+    days,
+    makeUpLogs
   };
 }
 
@@ -1554,11 +1565,11 @@ app.post('/api/users/:id/sign-in', asyncHandler(async (req, res) => {
       return { status: 409, payload: { ok: false, error: 'Cannot sign day', message: '还未到该签到日期' } };
     }
 
-    const makeUpCost = action.canMakeUp ? 200 : 0;
+    const makeUpCost = action.canMakeUp ? 500 : 0;
     const reward = Number(targetEntry.reward) || getMonthlySignReward(currentMonthKey, requestedDay);
     const currentBalance = formatCabbageNumber(row.cabbageBalance, 2200.00);
     if (makeUpCost > 0 && currentBalance < makeUpCost) {
-      return { status: 409, payload: { ok: false, error: 'Insufficient balance', message: '大白菜不足，补签需要 200 大白菜' } };
+      return { status: 409, payload: { ok: false, error: 'Insufficient balance', message: '大白菜不足，补签需要 500 大白菜' } };
     }
     const balanceAfterCost = formatCabbageNumber(currentBalance - makeUpCost, 0);
     const nextBalance = formatCabbageNumber(balanceAfterCost + reward, 0);
@@ -1574,13 +1585,25 @@ app.post('/api/users/:id/sign-in', asyncHandler(async (req, res) => {
           ...currentHistory
         ];
 
+    const signedAt = new Date().toISOString();
+    const makeUpLogs = Array.isArray(signState.makeUpLogs) ? signState.makeUpLogs : [];
+    if (makeUpCost > 0) {
+      makeUpLogs.unshift({
+        day: requestedDay,
+        signedAt,
+        cost: formatCabbageNumberText(makeUpCost, 0),
+        reward: formatCabbageNumberText(reward, 0)
+      });
+    }
+
     signState.days[String(requestedDay)] = {
       ...targetEntry,
       signed: true,
       canSign: false,
       canMakeUp: false,
-      signedAt: new Date().toISOString()
+      signedAt
     };
+    signState.makeUpLogs = makeUpLogs;
 
     await lockedUser.update({
       cabbageBalance: nextBalance,
