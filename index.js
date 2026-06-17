@@ -2145,6 +2145,8 @@ app.get('/api/dishes/public-feed', asyncHandler(async (req, res) => {
     });
 
   feed.sort((left, right) => {
+    const stealDiff = Number(right.stealCount || 0) - Number(left.stealCount || 0);
+    if (stealDiff !== 0) return stealDiff;
     const starDiff = Number(right.stars || 0) - Number(left.stars || 0);
     if (starDiff !== 0) return starDiff;
     const salesDiff = Number(right.sales || 0) - Number(left.sales || 0);
