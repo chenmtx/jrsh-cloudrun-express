@@ -1974,13 +1974,7 @@ app.get('/api/dishes/public-feed', asyncHandler(async (req, res) => {
         .filter(dish => {
           if (!keyword) return true;
           const name = String(dish.name || '').toLowerCase();
-          const desc = String(dish.desc || '').toLowerCase();
-          const tags = Array.isArray(dish.tags) ? dish.tags.join(' ').toLowerCase() : '';
-          const category = String(dish.category || '').toLowerCase();
-          return name.includes(keyword)
-            || desc.includes(keyword)
-            || tags.includes(keyword)
-            || category.includes(keyword);
+          return name.includes(keyword);
         });
 
       const displaySettings = kitchen.displaySettings || kitchenInfo.displaySettings || {};
