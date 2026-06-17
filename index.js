@@ -257,7 +257,7 @@ function normalizeSignState(rawState = {}) {
     };
     return result;
   }, {});
-  return {
+  const normalized = {
     monthKey,
     days,
     makeUpLogs: (Array.isArray(state.makeUpLogs) ? state.makeUpLogs : [])
