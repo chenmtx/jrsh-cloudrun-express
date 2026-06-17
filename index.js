@@ -519,6 +519,71 @@ function toClientOrder(order) {
   };
 }
 
+function isLegacySoftDeletedOrderPayload(payload = {}) {
+  const deletedForUserIds = Array.isArray(payload.deletedForUserIds)
+    ? payload.deletedForUserIds.map(id => String(id || '').trim()).filter(Boolean)
+    : [];
+  return !!payload.deletedForMerchant || deletedForUserIds.length > 0;
+}
+
+async function cleanupLegacySoftDeletedOrders() {
+  const orderRows = await Order.findAll({
+    attributes: ['id', 'kitchenId', 'payload']
+  });
+  const deletedOrderIds = orderRows.reduce((result, order) => {
+    const row = order && order.toJSON ? order.toJSON() : order;
+    const payload = parseJson(row.payload, {});
+    if (isLegacySoftDeletedOrderPayload(payload)) {
+      result.push(String(row.id || '').trim());
+    }
+    return result;
+  }, []).filter(Boolean);
+
+  if (!deletedOrderIds.length) {
+    return {
+      deletedOrders: 0,
+      updatedKitchens: 0
+    };
+  }
+
+  const deletedOrderIdSet = new Set(deletedOrderIds);
+  const kitchenRows = await Kitchen.findAll({
+    attributes: ['id', 'orders']
+  });
+  const kitchensToUpdate = kitchenRows.reduce((result, kitchen) => {
+    const row = kitchen && kitchen.toJSON ? kitchen.toJSON() : kitchen;
+    const currentOrders = normalizeOrderList(row.orders);
+    const nextOrders = currentOrders.filter(item => !deletedOrderIdSet.has(String(item && item.id || '').trim()));
+    if (nextOrders.length === currentOrders.length) return result;
+    result.push({ kitchen, nextOrders });
+    return result;
+  }, []);
+
+  await sequelize.transaction(async transaction => {
+    if (deletedOrderIds.length > 0) {
+      await Order.destroy({
+        where: {
+          id: {
+            [Op.in]: deletedOrderIds
+          }
+        },
+        transaction
+      });
+    }
+
+    for (const item of kitchensToUpdate) {
+      await item.kitchen.update({
+        orders: stringifyJson(item.nextOrders, [])
+      }, { transaction });
+    }
+  });
+
+  return {
+    deletedOrders: deletedOrderIds.length,
+    updatedKitchens: kitchensToUpdate.length
+  };
+}
+
 async function replaceKitchenOrders(kitchenId, ownerUserId, orders, options = {}) {
   const normalizedOrders = normalizeOrderList(orders);
   await sequelize.transaction(async transaction => {
@@ -2940,6 +3005,8 @@ const port = process.env.PORT || 80;
 
 async function bootstrap() {
   await initDB();
+  const cleanupResult = await cleanupLegacySoftDeletedOrders();
+  console.log('历史软删除订单清理完成', cleanupResult);
   app.listen(port, () => {
     console.log('启动成功', port);
   });
