@@ -1840,9 +1840,10 @@ async function resolveIpRegionText(value) {
 }
 
 async function getClientRegionText(req, ipAddress = '') {
+  const regionFromIp = await resolveIpRegionText(ipAddress || getClientIpText(req));
+  if (regionFromIp && regionFromIp !== '未知') return regionFromIp;
   const headerRegion = getClientRegionHeaderText(req);
-  if (headerRegion) return normalizeProvinceName(headerRegion) || headerRegion;
-  return resolveIpRegionText(ipAddress || getClientIpText(req));
+  return headerRegion ? (normalizeProvinceName(headerRegion) || headerRegion) : '未知';
 }
 
 function normalizeLifeShareImages(images) {
@@ -1929,9 +1930,7 @@ async function toClientLifeSharePost(post, options = {}) {
   const comments = Array.isArray(options.comments) ? options.comments : undefined;
   const storedIpText = String(row.ipText || '').trim();
   const storedIpAddress = String(row.ipAddress || '').trim();
-  const ipRegionSource = storedIpAddress && (!storedIpText || storedIpText === '未知' || storedIpText === '中国' || isPublicIpv4(storedIpText))
-    ? storedIpAddress
-    : (storedIpText || '未知');
+  const ipRegionSource = storedIpAddress || storedIpText || '未知';
 
   return {
     id: postId,
