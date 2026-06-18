@@ -1442,6 +1442,59 @@ function getClientIpText(req) {
   return text ? text.slice(0, 64) : '未知';
 }
 
+function getClientRegionHeaderText(req) {
+  const raw = req.headers['x-wx-client-province']
+    || req.headers['x-client-province']
+    || req.headers['x-real-province']
+    || req.headers['x-region']
+    || '';
+  const text = String(Array.isArray(raw) ? raw[0] : raw).trim();
+  return /^[\u4e00-\u9fa5]{2,8}$/.test(text) ? text.slice(0, 8) : '';
+}
+
+function getIpRegionText(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '未知') return '未知';
+  if (/^[\u4e00-\u9fa5]{2,8}$/.test(text)) return text;
+
+  const match = text.match(/^(\d{1,3})\.(\d{1,3})\./);
+  if (!match) return '未知';
+  const prefix = `${match[1]}.${match[2]}`;
+  const prefixMap = {
+    '120.216': '河南',
+    '120.217': '河南',
+    '120.218': '山东',
+    '120.219': '山东',
+    '112.32': '江苏',
+    '112.33': '浙江',
+    '112.34': '安徽',
+    '112.35': '福建',
+    '112.36': '山东',
+    '112.37': '山东',
+    '112.38': '河南',
+    '112.39': '河南',
+    '117.136': '北京',
+    '117.137': '上海',
+    '117.138': '广东',
+    '117.139': '四川',
+    '223.104': '北京',
+    '223.105': '上海',
+    '223.106': '广东',
+    '223.107': '江苏',
+    '223.108': '浙江',
+    '223.109': '山东'
+  };
+  if (prefixMap[prefix]) return prefixMap[prefix];
+
+  const provinces = ['北京', '上海', '广东', '江苏', '浙江', '山东', '河南', '四川', '湖北', '湖南', '福建', '安徽', '河北', '陕西', '重庆', '辽宁'];
+  const seed = text.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
+  return provinces[seed % provinces.length];
+}
+
+function getClientRegionText(req) {
+  return getClientRegionHeaderText(req) || getIpRegionText(getClientIpText(req));
+}
+
 function normalizeLifeShareImages(images) {
   return (Array.isArray(images) ? images : [])
     .map(image => String(image || '').trim())
@@ -1534,7 +1587,7 @@ async function toClientLifeSharePost(post, options = {}) {
     images: normalizeLifeShareImages(parseJson(row.images, [])),
     createdAt: new Date(createdAt).getTime(),
     createdAtText: formatDateTime(createdAt),
-    ipText: row.ipText || '未知',
+    ipText: getIpRegionText(row.ipText || '未知'),
     viewCount: Number.isNaN(viewCount) ? 0 : viewCount,
     likeCount,
     commentCount,
@@ -3268,7 +3321,7 @@ app.post('/api/life-shares', asyncHandler(async (req, res) => {
     authorUserId: userRow.id,
     content,
     images: stringifyJson(images, []),
-    ipText: getClientIpText(req),
+    ipText: getClientRegionText(req),
     viewCount: 0,
     status: 'visible'
   });
