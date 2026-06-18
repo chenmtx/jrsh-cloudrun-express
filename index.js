@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const http = require('http');
 const https = require('https');
 const express = require('express');
 const cors = require('cors');
@@ -14,7 +15,8 @@ const {
   Dish,
   LifeSharePost,
   LifeShareComment,
-  LifeShareLike
+  LifeShareLike,
+  LifeShareNotification
 } = require('./db');
 
 const app = express();
@@ -1431,19 +1433,6 @@ async function requireLifeShareUser(req, body = {}) {
   return user;
 }
 
-function getClientIpText(req) {
-  const raw = req.headers['x-forwarded-for']
-    || req.headers['x-real-ip']
-    || req.headers['x-wx-client-ip']
-    || req.ip
-    || '';
-  const text = String(Array.isArray(raw) ? raw[0] : raw)
-    .split(',')[0]
-    .replace(/^::ffff:/, '')
-    .trim();
-  return text ? text.slice(0, 64) : '未知';
-}
-
 function getClientRegionHeaderText(req) {
   const raw = req.headers['x-wx-client-province']
     || req.headers['x-client-province']
@@ -1452,6 +1441,14 @@ function getClientRegionHeaderText(req) {
     || '';
   const text = String(Array.isArray(raw) ? raw[0] : raw).trim();
   return /^[\u4e00-\u9fa5]{2,8}$/.test(text) ? text.slice(0, 8) : '';
+}
+
+function normalizeIpv4Text(value) {
+  const match = String(value || '')
+    .replace(/^::ffff:/, '')
+    .trim()
+    .match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  return match ? match[0] : '';
 }
 
 function isPublicIpv4(value) {
@@ -1463,6 +1460,29 @@ function isPublicIpv4(value) {
   if (a === 192 && b === 168) return false;
   if (a === 169 && b === 254) return false;
   return true;
+}
+
+function getHeaderIpCandidates(value) {
+  const raw = Array.isArray(value) ? value.join(',') : String(value || '');
+  return raw
+    .split(',')
+    .map(normalizeIpv4Text)
+    .filter(Boolean);
+}
+
+function getClientIpText(req) {
+  const headers = req.headers || {};
+  const candidates = [
+    ...getHeaderIpCandidates(headers['x-wx-client-ip']),
+    ...getHeaderIpCandidates(headers['x-client-ip']),
+    ...getHeaderIpCandidates(headers['cf-connecting-ip']),
+    ...getHeaderIpCandidates(headers['x-real-ip']),
+    ...getHeaderIpCandidates(headers['x-forwarded-for']),
+    normalizeIpv4Text(req.ip)
+  ].filter(Boolean);
+
+  const publicIp = candidates.find(isPublicIpv4);
+  return (publicIp || candidates[0] || '未知').slice(0, 64);
 }
 
 function normalizeProvinceName(value) {
@@ -1628,14 +1648,15 @@ function parseIp2RegionText(regionText) {
   return country;
 }
 
-function readJsonFromHttps(url, timeoutMs = 1800, redirectCount = 0) {
+function readJsonFromUrl(url, timeoutMs = 1800, redirectCount = 0) {
   return new Promise(resolve => {
-    const req = https.get(url, { timeout: timeoutMs }, res => {
+    const client = String(url || '').startsWith('https:') ? https : http;
+    const req = client.get(url, { timeout: timeoutMs }, res => {
       const statusCode = Number(res.statusCode || 0);
       const location = res.headers && res.headers.location;
       if (statusCode >= 300 && statusCode < 400 && location && redirectCount < 2) {
         res.resume();
-        resolve(readJsonFromHttps(new URL(location, url).toString(), timeoutMs, redirectCount + 1));
+        resolve(readJsonFromUrl(new URL(location, url).toString(), timeoutMs, redirectCount + 1));
         return;
       }
       if (statusCode < 200 || statusCode >= 300) {
@@ -1670,21 +1691,11 @@ function formatOnlineRegionResult(country, province) {
   return countryText;
 }
 
-function parseBaiduIpRegionResponse(payload) {
-  const data = payload && payload.data ? payload.data : null;
-  if (!data) return '';
+function parseIpApiRegionResponse(payload) {
+  if (!payload || payload.status !== 'success') return '';
   return formatOnlineRegionResult(
-    data.country,
-    data.prov || data.province || data.region
-  );
-}
-
-function parseVoreIpRegionResponse(payload) {
-  const data = payload && payload.ipdata ? payload.ipdata : null;
-  if (!data) return '';
-  return formatOnlineRegionResult(
-    data.info1 || data.country,
-    data.info2 || data.province || data.region
+    payload.country,
+    payload.regionName || payload.province || payload.region
   );
 }
 
@@ -1693,24 +1704,12 @@ async function lookupOnlineIpRegion(ip) {
   if (onlineIpRegionCache.has(ip)) return onlineIpRegionCache.get(ip);
 
   const encodedIp = encodeURIComponent(ip);
-  const providers = [
-    {
-      url: `https://qifu-api.baidubce.com/ip/geo/v1/district?ip=${encodedIp}`,
-      parse: parseBaiduIpRegionResponse
-    },
-    {
-      url: `https://api.vore.top/api/IPdata?ip=${encodedIp}`,
-      parse: parseVoreIpRegionResponse
-    }
-  ];
-
-  for (const provider of providers) {
-    const payload = await readJsonFromHttps(provider.url);
-    const region = provider.parse(payload);
-    if (region) {
-      onlineIpRegionCache.set(ip, region);
-      return region;
-    }
+  const url = `http://ip-api.com/json/${encodedIp}?lang=zh-CN&fields=status,country,countryCode,regionName,query`;
+  const payload = await readJsonFromUrl(url);
+  const region = parseIpApiRegionResponse(payload);
+  if (region) {
+    onlineIpRegionCache.set(ip, region);
+    return region;
   }
 
   onlineIpRegionCache.set(ip, '');
@@ -1853,14 +1852,18 @@ function normalizeLifeShareImages(images) {
     .slice(0, 9);
 }
 
-async function toClientLifeShareComment(comment, userMap = {}) {
+async function toClientLifeShareComment(comment, userMap = {}, parentCommentMap = {}) {
   const row = comment && comment.toJSON ? comment.toJSON() : (comment || {});
   const user = userMap[String(row.userId || '')] || {};
+  const parentComment = parentCommentMap[String(row.parentCommentId || '')] || {};
+  const parentUser = userMap[String(parentComment.userId || '')] || {};
   const createdAt = row.createdAt || new Date();
   return {
     id: row.id,
     postId: row.postId,
     userId: row.userId,
+    parentCommentId: row.parentCommentId || '',
+    parentUserName: parentUser.nickname || '',
     userName: user.nickname || '用户',
     userAvatar: user.avatar || '',
     content: row.content || '',
@@ -1948,6 +1951,69 @@ async function toClientLifeSharePost(post, options = {}) {
     heatCount: (Number.isNaN(viewCount) ? 0 : viewCount) + likeCount + commentCount,
     liked: likedSet.has(postId),
     ...(comments ? { comments } : {})
+  };
+}
+
+function getLifeShareNotificationTypeText(type) {
+  const map = {
+    like: '点赞',
+    comment: '评论',
+    reply: '回复'
+  };
+  return map[String(type || '').trim()] || '互动';
+}
+
+async function buildLifeSharePostMap(postIds = []) {
+  const ids = Array.from(new Set(postIds.map(id => String(id || '').trim()).filter(Boolean)));
+  if (!ids.length) return {};
+  const posts = await LifeSharePost.findAll({ where: { id: { [Op.in]: ids } } });
+  return posts.reduce((result, post) => {
+    const row = post.toJSON ? post.toJSON() : post;
+    result[String(row.id || '')] = row;
+    return result;
+  }, {});
+}
+
+async function createLifeShareNotification(payload = {}) {
+  const recipientUserId = String(payload.recipientUserId || '').trim();
+  const actorUserId = String(payload.actorUserId || '').trim();
+  const postId = String(payload.postId || '').trim();
+  const type = String(payload.type || '').trim();
+  if (!recipientUserId || !actorUserId || !postId || !type || recipientUserId === actorUserId) return null;
+  return LifeShareNotification.create({
+    id: makeId('life_notice'),
+    recipientUserId,
+    actorUserId,
+    postId,
+    commentId: String(payload.commentId || '').trim() || null,
+    parentCommentId: String(payload.parentCommentId || '').trim() || null,
+    type,
+    content: String(payload.content || '').trim().slice(0, 300),
+    status: 'visible'
+  });
+}
+
+async function toClientLifeShareNotification(notification, options = {}) {
+  const row = notification && notification.toJSON ? notification.toJSON() : (notification || {});
+  const userMap = options.userMap || {};
+  const postMap = options.postMap || {};
+  const actor = userMap[String(row.actorUserId || '')] || {};
+  const post = postMap[String(row.postId || '')] || {};
+  const createdAt = row.createdAt || new Date();
+  return {
+    id: row.id,
+    type: row.type || '',
+    typeText: getLifeShareNotificationTypeText(row.type),
+    actorUserId: row.actorUserId || '',
+    actorName: actor.nickname || '用户',
+    actorAvatar: actor.avatar || '',
+    postId: row.postId || '',
+    commentId: row.commentId || '',
+    parentCommentId: row.parentCommentId || '',
+    content: row.content || '',
+    postContent: String(post.content || '').slice(0, 80),
+    createdAt: new Date(createdAt).getTime(),
+    createdAtText: formatDateTime(createdAt)
   };
 }
 
@@ -3705,12 +3771,24 @@ app.get('/api/life-shares/:id', asyncHandler(async (req, res) => {
     order: [['createdAt', 'ASC']]
   });
   const postRow = post.toJSON ? post.toJSON() : post;
-  const commentUserIds = comments.map(comment => (comment.toJSON ? comment.toJSON() : comment).userId);
+  const commentRows = comments.map(comment => (comment.toJSON ? comment.toJSON() : comment));
+  const parentCommentIds = Array.from(new Set(commentRows.map(comment => String(comment.parentCommentId || '')).filter(Boolean)));
+  const parentComments = parentCommentIds.length
+    ? await LifeShareComment.findAll({ where: { id: { [Op.in]: parentCommentIds } } })
+    : [];
+  const parentCommentMap = parentComments.reduce((result, comment) => {
+    const row = comment.toJSON ? comment.toJSON() : comment;
+    result[String(row.id || '')] = row;
+    return result;
+  }, {});
+  const commentUserIds = commentRows
+    .map(comment => comment.userId)
+    .concat(parentComments.map(comment => (comment.toJSON ? comment.toJSON() : comment).userId));
   const userMap = await buildLifeShareUserMap([postRow.authorUserId].concat(commentUserIds));
   const likeCountMap = await buildLifeShareLikeCountMap([postId]);
   const commentCountMap = await buildLifeShareCommentCountMap([postId]);
   const likedSet = await buildCurrentUserLikedSet([postId], currentUserId);
-  const clientComments = await Promise.all(comments.map(comment => toClientLifeShareComment(comment, userMap)));
+  const clientComments = await Promise.all(comments.map(comment => toClientLifeShareComment(comment, userMap, parentCommentMap)));
 
   res.send({
     post: await toClientLifeSharePost(post, {
@@ -3721,6 +3799,31 @@ app.get('/api/life-shares/:id', asyncHandler(async (req, res) => {
       comments: clientComments
     })
   });
+}));
+
+app.delete('/api/life-shares/:id', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const postId = String(req.params.id || '').trim();
+  const post = await LifeSharePost.findOne({ where: { id: postId, status: 'visible' } });
+  if (!post) {
+    res.status(404).send({ ok: false, error: 'Post not found', message: '分享内容不存在' });
+    return;
+  }
+
+  const user = await requireLifeShareUser(req, body);
+  const userId = String((user.toJSON ? user.toJSON() : user).id || '');
+  const postRow = post.toJSON ? post.toJSON() : post;
+  if (String(postRow.authorUserId || '') !== userId) {
+    res.status(403).send({ ok: false, error: 'Forbidden', message: '只能删除自己发布的内容' });
+    return;
+  }
+
+  await LifeShareLike.destroy({ where: { postId } });
+  await LifeShareComment.destroy({ where: { postId } });
+  await LifeShareNotification.destroy({ where: { postId } });
+  await post.update({ status: 'deleted' });
+
+  res.send({ ok: true, deletedId: postId });
 }));
 
 app.post('/api/life-shares/:id/view', asyncHandler(async (req, res) => {
@@ -3770,6 +3873,13 @@ app.post('/api/life-shares/:id/like', asyncHandler(async (req, res) => {
   } else {
     await LifeShareLike.create({ id: likeId, postId, userId });
     liked = true;
+    const postRow = post.toJSON ? post.toJSON() : post;
+    await createLifeShareNotification({
+      recipientUserId: postRow.authorUserId,
+      actorUserId: userId,
+      postId,
+      type: 'like'
+    });
   }
 
   const postRow = post.toJSON ? post.toJSON() : post;
@@ -3800,21 +3910,42 @@ app.post('/api/life-shares/:id/comments', asyncHandler(async (req, res) => {
   const user = await requireLifeShareUser(req, body);
   const userId = String((user.toJSON ? user.toJSON() : user).id || '');
   const content = String(body.content || '').trim().slice(0, 300);
+  const parentCommentId = String(body.parentCommentId || body.replyToCommentId || '').trim();
   if (!content) {
     res.status(400).send({ ok: false, error: 'Invalid comment', message: '请输入评论内容' });
     return;
+  }
+  let parentComment = null;
+  if (parentCommentId) {
+    parentComment = await LifeShareComment.findOne({ where: { id: parentCommentId, postId, status: 'visible' } });
+    if (!parentComment) {
+      res.status(404).send({ ok: false, error: 'Parent comment not found', message: '回复的评论不存在' });
+      return;
+    }
   }
 
   const comment = await LifeShareComment.create({
     id: makeId('life_comment'),
     postId,
     userId,
+    parentCommentId: parentCommentId || null,
     content,
     status: 'visible'
   });
   const postRow = post.toJSON ? post.toJSON() : post;
-  const userMap = await buildLifeShareUserMap([postRow.authorUserId, userId]);
-  const clientComment = await toClientLifeShareComment(comment, userMap);
+  const parentCommentRow = parentComment ? (parentComment.toJSON ? parentComment.toJSON() : parentComment) : null;
+  await createLifeShareNotification({
+    recipientUserId: parentCommentRow ? parentCommentRow.userId : postRow.authorUserId,
+    actorUserId: userId,
+    postId,
+    commentId: comment.id,
+    parentCommentId: parentCommentId || '',
+    type: parentCommentRow ? 'reply' : 'comment',
+    content
+  });
+  const userMap = await buildLifeShareUserMap([postRow.authorUserId, userId, parentCommentRow && parentCommentRow.userId]);
+  const parentCommentMap = parentCommentRow ? { [String(parentCommentRow.id || '')]: parentCommentRow } : {};
+  const clientComment = await toClientLifeShareComment(comment, userMap, parentCommentMap);
   const likeCountMap = await buildLifeShareLikeCountMap([postId]);
   const commentCountMap = await buildLifeShareCommentCountMap([postId]);
   const likedSet = await buildCurrentUserLikedSet([postId], userId);
@@ -3829,6 +3960,70 @@ app.post('/api/life-shares/:id/comments', asyncHandler(async (req, res) => {
       likedSet
     })
   });
+}));
+
+app.get('/api/life-share-notifications', asyncHandler(async (req, res) => {
+  const requestUserId = getOptionalRequestUserId(req, req.query || {});
+  const user = await findUserByIdOrLoginKey(requestUserId);
+  if (!user) {
+    res.status(401).send({ ok: false, error: 'User not found', message: '请先登录后再查看通知' });
+    return;
+  }
+  const userId = String((user.toJSON ? user.toJSON() : user).id || '');
+  const filter = String(req.query.filter || 'all').trim();
+  const where = {
+    recipientUserId: userId,
+    status: 'visible'
+  };
+  if (['like', 'comment', 'reply'].includes(filter)) {
+    where.type = filter;
+  }
+  const rows = await LifeShareNotification.findAll({
+    where,
+    order: [['createdAt', 'DESC'], ['id', 'DESC']],
+    limit: 100
+  });
+  const actorIds = rows.map(row => (row.toJSON ? row.toJSON() : row).actorUserId);
+  const postIds = rows.map(row => (row.toJSON ? row.toJSON() : row).postId);
+  const userMap = await buildLifeShareUserMap(actorIds);
+  const postMap = await buildLifeSharePostMap(postIds);
+  const notifications = await Promise.all(rows.map(row => toClientLifeShareNotification(row, { userMap, postMap })));
+  res.send({ notifications });
+}));
+
+app.delete('/api/life-share-notifications/:id', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const requestUserId = getOptionalRequestUserId(req, body);
+  const user = await findUserByIdOrLoginKey(requestUserId);
+  if (!user) {
+    res.status(401).send({ ok: false, error: 'User not found', message: '请先登录后再操作' });
+    return;
+  }
+  const userId = String((user.toJSON ? user.toJSON() : user).id || '');
+  const id = String(req.params.id || '').trim();
+  const count = await LifeShareNotification.update(
+    { status: 'deleted' },
+    { where: { id, recipientUserId: userId, status: 'visible' } }
+  );
+  res.send({ ok: true, deleted: Array.isArray(count) ? Number(count[0] || 0) : 0 });
+}));
+
+app.delete('/api/life-share-notifications', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const requestUserId = getOptionalRequestUserId(req, body);
+  const user = await findUserByIdOrLoginKey(requestUserId);
+  if (!user) {
+    res.status(401).send({ ok: false, error: 'User not found', message: '请先登录后再操作' });
+    return;
+  }
+  const userId = String((user.toJSON ? user.toJSON() : user).id || '');
+  const filter = String(body.filter || req.query.filter || 'all').trim();
+  const where = { recipientUserId: userId, status: 'visible' };
+  if (['like', 'comment', 'reply'].includes(filter)) {
+    where.type = filter;
+  }
+  const count = await LifeShareNotification.update({ status: 'deleted' }, { where });
+  res.send({ ok: true, deleted: Array.isArray(count) ? Number(count[0] || 0) : 0 });
 }));
 
 app.use((err, req, res, next) => {

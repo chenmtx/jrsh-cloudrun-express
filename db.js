@@ -287,6 +287,10 @@ const LifeShareComment = sequelize.define('JrshLifeShareComment', {
     type: DataTypes.STRING(128),
     allowNull: false
   },
+  parentCommentId: {
+    type: DataTypes.STRING(128),
+    allowNull: true
+  },
   content: {
     type: DataTypes.STRING(300),
     allowNull: false
@@ -310,6 +314,46 @@ const LifeShareLike = sequelize.define('JrshLifeShareLike', {
   userId: {
     type: DataTypes.STRING(128),
     allowNull: false
+  }
+});
+
+const LifeShareNotification = sequelize.define('JrshLifeShareNotification', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
+  },
+  recipientUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  actorUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  postId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  commentId: {
+    type: DataTypes.STRING(128),
+    allowNull: true
+  },
+  parentCommentId: {
+    type: DataTypes.STRING(128),
+    allowNull: true
+  },
+  type: {
+    type: DataTypes.STRING(32),
+    allowNull: false
+  },
+  content: {
+    type: DataTypes.STRING(300),
+    allowNull: true
+  },
+  status: {
+    type: DataTypes.STRING(32),
+    allowNull: false,
+    defaultValue: 'visible'
   }
 });
 
@@ -363,6 +407,7 @@ async function ensureRequiredColumns() {
   await addColumnIfMissing('JrshDish', 'payload', 'LONGTEXT NULL');
 
   await addColumnIfMissing('JrshLifeSharePost', 'ipAddress', 'VARCHAR(64) NULL');
+  await addColumnIfMissing('JrshLifeShareComment', 'parentCommentId', 'VARCHAR(128) NULL');
 }
 
 async function ensureUtf8mb4() {
@@ -373,7 +418,8 @@ async function ensureUtf8mb4() {
     'JrshDish',
     'JrshLifeSharePost',
     'JrshLifeShareComment',
-    'JrshLifeShareLike'
+    'JrshLifeShareLike',
+    'JrshLifeShareNotification'
   ];
   try {
     await sequelize.query(`ALTER DATABASE ${quoteIdentifier(MYSQL_DATABASE)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
@@ -399,6 +445,7 @@ async function init() {
   await LifeSharePost.sync();
   await LifeShareComment.sync();
   await LifeShareLike.sync();
+  await LifeShareNotification.sync();
   await ensureRequiredColumns();
   await ensureUtf8mb4();
 }
@@ -412,5 +459,6 @@ module.exports = {
   Dish,
   LifeSharePost,
   LifeShareComment,
-  LifeShareLike
+  LifeShareLike,
+  LifeShareNotification
 };
