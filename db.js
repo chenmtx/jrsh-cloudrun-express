@@ -350,6 +350,11 @@ const LifeShareNotification = sequelize.define('JrshLifeShareNotification', {
     type: DataTypes.STRING(300),
     allowNull: true
   },
+  readStatus: {
+    type: DataTypes.STRING(32),
+    allowNull: false,
+    defaultValue: 'unread'
+  },
   status: {
     type: DataTypes.STRING(32),
     allowNull: false,
@@ -408,6 +413,7 @@ async function ensureRequiredColumns() {
 
   await addColumnIfMissing('JrshLifeSharePost', 'ipAddress', 'VARCHAR(64) NULL');
   await addColumnIfMissing('JrshLifeShareComment', 'parentCommentId', 'VARCHAR(128) NULL');
+  await addColumnIfMissing('JrshLifeShareNotification', 'readStatus', "VARCHAR(32) NOT NULL DEFAULT 'unread'");
 }
 
 async function ensureUtf8mb4() {

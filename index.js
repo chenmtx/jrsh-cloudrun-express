@@ -1485,6 +1485,19 @@ function getClientIpText(req) {
   return (publicIp || candidates[0] || '未知').slice(0, 64);
 }
 
+function logLifeShareIpDebug(req, selectedIp, resolvedRegion) {
+  const headers = req.headers || {};
+  console.log('[life-share-ip]', JSON.stringify({
+    selectedIp,
+    resolvedRegion,
+    xWxClientIp: headers['x-wx-client-ip'] || '',
+    xClientIp: headers['x-client-ip'] || '',
+    xRealIp: headers['x-real-ip'] || '',
+    xForwardedFor: headers['x-forwarded-for'] || '',
+    reqIp: req.ip || ''
+  }));
+}
+
 function normalizeProvinceName(value) {
   const text = String(value || '').trim();
   if (!text) return '';
@@ -1989,6 +2002,7 @@ async function createLifeShareNotification(payload = {}) {
     parentCommentId: String(payload.parentCommentId || '').trim() || null,
     type,
     content: String(payload.content || '').trim().slice(0, 300),
+    readStatus: 'unread',
     status: 'visible'
   });
 }
@@ -3737,12 +3751,14 @@ app.post('/api/life-shares', asyncHandler(async (req, res) => {
   }
 
   const ipAddress = getClientIpText(req);
+  const ipText = await getClientRegionText(req, ipAddress);
+  logLifeShareIpDebug(req, ipAddress, ipText);
   const post = await LifeSharePost.create({
     id: makeId('life_post'),
     authorUserId: userRow.id,
     content,
     images: stringifyJson(images, []),
-    ipText: await getClientRegionText(req, ipAddress),
+    ipText,
     ipAddress: ipAddress === '未知' ? '' : ipAddress,
     viewCount: 0,
     status: 'visible'
@@ -3971,10 +3987,15 @@ app.get('/api/life-share-notifications', asyncHandler(async (req, res) => {
   }
   const userId = String((user.toJSON ? user.toJSON() : user).id || '');
   const filter = String(req.query.filter || 'all').trim();
+  const unreadOnly = String(req.query.unreadOnly || '') === '1';
+  const markRead = String(req.query.markRead || '') === '1';
   const where = {
     recipientUserId: userId,
     status: 'visible'
   };
+  if (unreadOnly) {
+    where.readStatus = 'unread';
+  }
   if (['like', 'comment', 'reply'].includes(filter)) {
     where.type = filter;
   }
@@ -3988,6 +4009,12 @@ app.get('/api/life-share-notifications', asyncHandler(async (req, res) => {
   const userMap = await buildLifeShareUserMap(actorIds);
   const postMap = await buildLifeSharePostMap(postIds);
   const notifications = await Promise.all(rows.map(row => toClientLifeShareNotification(row, { userMap, postMap })));
+  if (markRead && !unreadOnly) {
+    await LifeShareNotification.update(
+      { readStatus: 'read' },
+      { where: { recipientUserId: userId, status: 'visible', readStatus: 'unread' } }
+    );
+  }
   res.send({ notifications });
 }));
 
