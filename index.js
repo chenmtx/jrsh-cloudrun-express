@@ -1,4 +1,5 @@
 const path = require('path');
+const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
@@ -1452,47 +1453,263 @@ function getClientRegionHeaderText(req) {
   return /^[\u4e00-\u9fa5]{2,8}$/.test(text) ? text.slice(0, 8) : '';
 }
 
-function getIpRegionText(value) {
-  const text = String(value || '').trim();
-  if (!text || text === '未知') return '未知';
-  if (/^[\u4e00-\u9fa5]{2,8}$/.test(text)) return text;
-
-  const match = text.match(/^(\d{1,3})\.(\d{1,3})\./);
-  if (!match) return '未知';
-  const prefix = `${match[1]}.${match[2]}`;
-  const prefixMap = {
-    '120.216': '河南',
-    '120.217': '河南',
-    '120.218': '山东',
-    '120.219': '山东',
-    '112.32': '江苏',
-    '112.33': '浙江',
-    '112.34': '安徽',
-    '112.35': '福建',
-    '112.36': '山东',
-    '112.37': '山东',
-    '112.38': '河南',
-    '112.39': '河南',
-    '117.136': '北京',
-    '117.137': '上海',
-    '117.138': '广东',
-    '117.139': '四川',
-    '223.104': '北京',
-    '223.105': '上海',
-    '223.106': '广东',
-    '223.107': '江苏',
-    '223.108': '浙江',
-    '223.109': '山东'
-  };
-  if (prefixMap[prefix]) return prefixMap[prefix];
-
-  const provinces = ['北京', '上海', '广东', '江苏', '浙江', '山东', '河南', '四川', '湖北', '湖南', '福建', '安徽', '河北', '陕西', '重庆', '辽宁'];
-  const seed = text.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0);
-  return provinces[seed % provinces.length];
+function isPublicIpv4(value) {
+  const parts = String(value || '').trim().split('.').map(part => Number(part));
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  if (a === 10 || a === 127 || a === 0) return false;
+  if (a === 172 && b >= 16 && b <= 31) return false;
+  if (a === 192 && b === 168) return false;
+  if (a === 169 && b === 254) return false;
+  return true;
 }
 
-function getClientRegionText(req) {
-  return getClientRegionHeaderText(req) || getIpRegionText(getClientIpText(req));
+function normalizeProvinceName(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text
+    .replace(/省$/, '')
+    .replace(/市$/, '')
+    .replace(/壮族自治区$/, '')
+    .replace(/回族自治区$/, '')
+    .replace(/维吾尔自治区$/, '')
+    .replace(/自治区$/, '')
+    .replace(/特别行政区$/, '')
+    .slice(0, 8);
+}
+
+const GEOIP_CHINA_REGION_MAP = {
+  BJ: '北京',
+  TJ: '天津',
+  HE: '河北',
+  SX: '山西',
+  NM: '内蒙古',
+  LN: '辽宁',
+  JL: '吉林',
+  HL: '黑龙江',
+  SH: '上海',
+  JS: '江苏',
+  ZJ: '浙江',
+  AH: '安徽',
+  FJ: '福建',
+  JX: '江西',
+  SD: '山东',
+  HA: '河南',
+  HB: '湖北',
+  HN: '湖南',
+  GD: '广东',
+  GX: '广西',
+  HI: '海南',
+  CQ: '重庆',
+  SC: '四川',
+  GZ: '贵州',
+  YN: '云南',
+  XZ: '西藏',
+  SN: '陕西',
+  GS: '甘肃',
+  QH: '青海',
+  NX: '宁夏',
+  XJ: '新疆',
+  TW: '台湾',
+  HK: '香港',
+  MO: '澳门',
+  11: '北京',
+  12: '天津',
+  13: '河北',
+  14: '山西',
+  15: '内蒙古',
+  21: '辽宁',
+  22: '吉林',
+  23: '黑龙江',
+  31: '上海',
+  32: '江苏',
+  33: '浙江',
+  34: '安徽',
+  35: '福建',
+  36: '江西',
+  37: '山东',
+  41: '河南',
+  42: '湖北',
+  43: '湖南',
+  44: '广东',
+  45: '广西',
+  46: '海南',
+  50: '重庆',
+  51: '四川',
+  52: '贵州',
+  53: '云南',
+  54: '西藏',
+  61: '陕西',
+  62: '甘肃',
+  63: '青海',
+  64: '宁夏',
+  65: '新疆',
+  71: '台湾',
+  81: '香港',
+  82: '澳门'
+};
+
+const GEOIP_CHINA_REGION_CENTERS = [
+  ['北京', 39.9042, 116.4074],
+  ['天津', 39.3434, 117.3616],
+  ['河北', 38.0428, 114.5149],
+  ['山西', 37.8706, 112.5489],
+  ['内蒙古', 40.8175, 111.7652],
+  ['辽宁', 41.8057, 123.4315],
+  ['吉林', 43.8171, 125.3235],
+  ['黑龙江', 45.8038, 126.5349],
+  ['上海', 31.2304, 121.4737],
+  ['江苏', 32.0603, 118.7969],
+  ['浙江', 30.2741, 120.1551],
+  ['安徽', 31.8206, 117.2272],
+  ['福建', 26.0745, 119.2965],
+  ['江西', 28.6829, 115.8582],
+  ['山东', 36.6512, 117.1201],
+  ['河南', 34.7466, 113.6254],
+  ['湖北', 30.5928, 114.3055],
+  ['湖南', 28.2282, 112.9388],
+  ['广东', 23.1291, 113.2644],
+  ['广西', 22.8170, 108.3669],
+  ['海南', 20.0444, 110.1999],
+  ['重庆', 29.5630, 106.5516],
+  ['四川', 30.5728, 104.0668],
+  ['贵州', 26.6470, 106.6302],
+  ['云南', 25.0389, 102.7183],
+  ['西藏', 29.6520, 91.1721],
+  ['陕西', 34.3416, 108.9398],
+  ['甘肃', 36.0611, 103.8343],
+  ['青海', 36.6171, 101.7782],
+  ['宁夏', 38.4872, 106.2309],
+  ['新疆', 43.8256, 87.6168],
+  ['台湾', 25.0330, 121.5654],
+  ['香港', 22.3193, 114.1694],
+  ['澳门', 22.1987, 113.5439]
+];
+
+let offlineIpRanges = null;
+let geoipLiteModule;
+
+function getGeoipLiteModule() {
+  if (geoipLiteModule !== undefined) return geoipLiteModule;
+  try {
+    geoipLiteModule = require('geoip-lite');
+  } catch (err) {
+    geoipLiteModule = null;
+  }
+  return geoipLiteModule;
+}
+
+function normalizeGeoipRegionCode(value) {
+  return String(value || '')
+    .trim()
+    .replace(/^CN[-_]/i, '')
+    .toUpperCase();
+}
+
+function degreesToRadians(value) {
+  return value * Math.PI / 180;
+}
+
+function getGeoDistanceKm(lat1, lon1, lat2, lon2) {
+  const earthRadiusKm = 6371;
+  const dLat = degreesToRadians(lat2 - lat1);
+  const dLon = degreesToRadians(lon2 - lon1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
+    + Math.cos(degreesToRadians(lat1)) * Math.cos(degreesToRadians(lat2))
+    * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function lookupNearestChinaRegionByLocation(location) {
+  if (!Array.isArray(location) || location.length < 2) return '';
+  const lat = Number(location[0]);
+  const lon = Number(location[1]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return '';
+  let nearestRegion = '';
+  let nearestDistance = Infinity;
+  GEOIP_CHINA_REGION_CENTERS.forEach(([region, centerLat, centerLon]) => {
+    const distance = getGeoDistanceKm(lat, lon, centerLat, centerLon);
+    if (distance < nearestDistance) {
+      nearestDistance = distance;
+      nearestRegion = region;
+    }
+  });
+  return nearestRegion;
+}
+
+function lookupGeoipLiteRegion(ip) {
+  if (!isPublicIpv4(ip)) return '';
+  const geoip = getGeoipLiteModule();
+  if (!geoip || typeof geoip.lookup !== 'function') return '';
+  const result = geoip.lookup(ip);
+  if (!result || result.country !== 'CN') return '';
+  const region = GEOIP_CHINA_REGION_MAP[normalizeGeoipRegionCode(result.region)];
+  if (region) return region;
+  if (/^[\u4e00-\u9fa5]{2,8}$/.test(String(result.city || '').trim())) {
+    return normalizeProvinceName(result.city) || '';
+  }
+  return lookupNearestChinaRegionByLocation(result.ll);
+}
+
+function ipv4ToNumber(ip) {
+  const parts = String(ip || '').trim().split('.').map(part => Number(part));
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+  return (((parts[0] * 256 + parts[1]) * 256 + parts[2]) * 256 + parts[3]) >>> 0;
+}
+
+function loadOfflineIpRanges() {
+  if (offlineIpRanges !== null) return offlineIpRanges;
+  const filePath = path.join(__dirname, 'ip-region-ranges.json');
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw);
+    offlineIpRanges = Array.isArray(parsed)
+      ? parsed.map(item => ({
+          start: Number(item.start),
+          end: Number(item.end),
+          region: normalizeProvinceName(item.region)
+        })).filter(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.region)
+      : [];
+  } catch (err) {
+    offlineIpRanges = [];
+  }
+  return offlineIpRanges;
+}
+
+function lookupOfflineIpRegion(ip) {
+  if (!isPublicIpv4(ip)) return '';
+  const geoipRegion = lookupGeoipLiteRegion(ip);
+  if (geoipRegion) return geoipRegion;
+  const ipNumber = ipv4ToNumber(ip);
+  if (ipNumber === null) return '';
+  const ranges = loadOfflineIpRanges();
+  let left = 0;
+  let right = ranges.length - 1;
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+    const item = ranges[mid];
+    if (ipNumber < item.start) {
+      right = mid - 1;
+    } else if (ipNumber > item.end) {
+      left = mid + 1;
+    } else {
+      return item.region;
+    }
+  }
+  return '';
+}
+
+async function resolveIpRegionText(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '未知') return '未知';
+  if (/^[\u4e00-\u9fa5]{2,8}$/.test(text)) return normalizeProvinceName(text) || '未知';
+  return lookupOfflineIpRegion(text) || '未知';
+}
+
+async function getClientRegionText(req) {
+  const headerRegion = getClientRegionHeaderText(req);
+  if (headerRegion) return normalizeProvinceName(headerRegion) || headerRegion;
+  return resolveIpRegionText(getClientIpText(req));
 }
 
 function normalizeLifeShareImages(images) {
@@ -1587,7 +1804,7 @@ async function toClientLifeSharePost(post, options = {}) {
     images: normalizeLifeShareImages(parseJson(row.images, [])),
     createdAt: new Date(createdAt).getTime(),
     createdAtText: formatDateTime(createdAt),
-    ipText: getIpRegionText(row.ipText || '未知'),
+    ipText: await resolveIpRegionText(row.ipText || '未知'),
     viewCount: Number.isNaN(viewCount) ? 0 : viewCount,
     likeCount,
     commentCount,
@@ -3321,7 +3538,7 @@ app.post('/api/life-shares', asyncHandler(async (req, res) => {
     authorUserId: userRow.id,
     content,
     images: stringifyJson(images, []),
-    ipText: getClientRegionText(req),
+    ipText: await getClientRegionText(req),
     viewCount: 0,
     status: 'visible'
   });
