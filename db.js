@@ -236,6 +236,79 @@ const Dish = sequelize.define('JrshDish', {
   }
 });
 
+const LifeSharePost = sequelize.define('JrshLifeSharePost', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
+  },
+  authorUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  content: {
+    type: DataTypes.TEXT('long'),
+    allowNull: false
+  },
+  images: {
+    type: DataTypes.TEXT('long'),
+    allowNull: true
+  },
+  ipText: {
+    type: DataTypes.STRING(64),
+    allowNull: true,
+    defaultValue: '未知'
+  },
+  viewCount: {
+    type: DataTypes.INTEGER,
+    allowNull: false,
+    defaultValue: 0
+  },
+  status: {
+    type: DataTypes.STRING(32),
+    allowNull: false,
+    defaultValue: 'visible'
+  }
+});
+
+const LifeShareComment = sequelize.define('JrshLifeShareComment', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
+  },
+  postId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  userId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  content: {
+    type: DataTypes.STRING(300),
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.STRING(32),
+    allowNull: false,
+    defaultValue: 'visible'
+  }
+});
+
+const LifeShareLike = sequelize.define('JrshLifeShareLike', {
+  id: {
+    type: DataTypes.STRING(191),
+    primaryKey: true
+  },
+  postId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  userId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  }
+});
+
 function quoteIdentifier(value) {
   return `\`${String(value || '').replace(/`/g, '``')}\``;
 }
@@ -287,7 +360,15 @@ async function ensureRequiredColumns() {
 }
 
 async function ensureUtf8mb4() {
-  const tables = ['JrshUser', 'JrshKitchen', 'JrshOrder', 'JrshDish'];
+  const tables = [
+    'JrshUser',
+    'JrshKitchen',
+    'JrshOrder',
+    'JrshDish',
+    'JrshLifeSharePost',
+    'JrshLifeShareComment',
+    'JrshLifeShareLike'
+  ];
   try {
     await sequelize.query(`ALTER DATABASE ${quoteIdentifier(MYSQL_DATABASE)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
   } catch (err) {
@@ -309,6 +390,9 @@ async function init() {
   await Kitchen.sync();
   await Dish.sync();
   await Order.sync();
+  await LifeSharePost.sync();
+  await LifeShareComment.sync();
+  await LifeShareLike.sync();
   await ensureRequiredColumns();
   await ensureUtf8mb4();
 }
@@ -319,5 +403,8 @@ module.exports = {
   User,
   Kitchen,
   Order,
-  Dish
+  Dish,
+  LifeSharePost,
+  LifeShareComment,
+  LifeShareLike
 };

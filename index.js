@@ -3,7 +3,17 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const { Op } = require('sequelize');
-const { sequelize, init: initDB, User, Kitchen, Order, Dish } = require('./db');
+const {
+  sequelize,
+  init: initDB,
+  User,
+  Kitchen,
+  Order,
+  Dish,
+  LifeSharePost,
+  LifeShareComment,
+  LifeShareLike
+} = require('./db');
 
 const app = express();
 
@@ -177,6 +187,11 @@ function toClientUser(user) {
     cabbageBalance,
     cabbageHistory: parseUserCabbageHistory(row, cabbageBalance)
   };
+}
+
+function formatDateTime(date = new Date()) {
+  const value = date instanceof Date ? date : new Date(date || Date.now());
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')} ${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}:${String(value.getSeconds()).padStart(2, '0')}`;
 }
 
 function makeMonthlySignKey(date = new Date()) {
@@ -1388,6 +1403,145 @@ async function findUserByIdOrLoginKey(id) {
   if (current) return current;
 
   return User.findOne({ where: { openid: normalizedId } });
+}
+
+function getOptionalRequestUserId(req, body = {}) {
+  const raw = body.debugUserId
+    || body.userId
+    || body.clientUserId
+    || req.query.userId
+    || req.query.clientUserId
+    || req.headers['x-debug-user-id'];
+  if (raw) return String(raw).trim();
+  const wxOpenid = req.headers['x-wx-openid'];
+  return wxOpenid ? `wx_${wxOpenid}` : '';
+}
+
+async function requireLifeShareUser(req, body = {}) {
+  const userId = getOptionalRequestUserId(req, body);
+  const user = await findUserByIdOrLoginKey(userId);
+  if (!user) {
+    const err = new Error('User not found');
+    err.statusCode = 401;
+    err.clientMessage = '请先登录后再操作';
+    throw err;
+  }
+  return user;
+}
+
+function getClientIpText(req) {
+  const raw = req.headers['x-forwarded-for']
+    || req.headers['x-real-ip']
+    || req.headers['x-wx-client-ip']
+    || req.ip
+    || '';
+  const text = String(Array.isArray(raw) ? raw[0] : raw)
+    .split(',')[0]
+    .replace(/^::ffff:/, '')
+    .trim();
+  return text ? text.slice(0, 64) : '未知';
+}
+
+function normalizeLifeShareImages(images) {
+  return (Array.isArray(images) ? images : [])
+    .map(image => String(image || '').trim())
+    .filter(Boolean)
+    .slice(0, 9);
+}
+
+async function toClientLifeShareComment(comment, userMap = {}) {
+  const row = comment && comment.toJSON ? comment.toJSON() : (comment || {});
+  const user = userMap[String(row.userId || '')] || {};
+  const createdAt = row.createdAt || new Date();
+  return {
+    id: row.id,
+    postId: row.postId,
+    userId: row.userId,
+    userName: user.nickname || '用户',
+    userAvatar: user.avatar || '',
+    content: row.content || '',
+    createdAt: new Date(createdAt).getTime(),
+    createdAtText: formatDateTime(createdAt)
+  };
+}
+
+async function buildLifeShareUserMap(userIds = []) {
+  const ids = Array.from(new Set(userIds.map(id => String(id || '').trim()).filter(Boolean)));
+  if (!ids.length) return {};
+  const users = await User.findAll({
+    where: { id: { [Op.in]: ids } }
+  });
+  return users.reduce((map, user) => {
+    const row = user.toJSON ? user.toJSON() : user;
+    map[String(row.id)] = row;
+    return map;
+  }, {});
+}
+
+async function buildLifeShareLikeCountMap(postIds = []) {
+  const ids = Array.from(new Set(postIds.map(id => String(id || '').trim()).filter(Boolean)));
+  const result = {};
+  await Promise.all(ids.map(async id => {
+    result[id] = await LifeShareLike.count({ where: { postId: id } });
+  }));
+  return result;
+}
+
+async function buildLifeShareCommentCountMap(postIds = []) {
+  const ids = Array.from(new Set(postIds.map(id => String(id || '').trim()).filter(Boolean)));
+  const result = {};
+  await Promise.all(ids.map(async id => {
+    result[id] = await LifeShareComment.count({ where: { postId: id, status: 'visible' } });
+  }));
+  return result;
+}
+
+async function buildCurrentUserLikedSet(postIds = [], currentUserId = '') {
+  const ids = Array.from(new Set(postIds.map(id => String(id || '').trim()).filter(Boolean)));
+  const userId = String(currentUserId || '').trim();
+  if (!ids.length || !userId) return new Set();
+  const likes = await LifeShareLike.findAll({
+    where: {
+      userId,
+      postId: { [Op.in]: ids }
+    }
+  });
+  return new Set(likes.map(like => String((like.toJSON ? like.toJSON() : like).postId || '')));
+}
+
+async function toClientLifeSharePost(post, options = {}) {
+  const row = post && post.toJSON ? post.toJSON() : (post || {});
+  const userMap = options.userMap || await buildLifeShareUserMap([row.authorUserId]);
+  const author = userMap[String(row.authorUserId || '')] || {};
+  const postId = String(row.id || '');
+  const likeCount = options.likeCountMap && options.likeCountMap[postId] !== undefined
+    ? options.likeCountMap[postId]
+    : await LifeShareLike.count({ where: { postId } });
+  const commentCount = options.commentCountMap && options.commentCountMap[postId] !== undefined
+    ? options.commentCountMap[postId]
+    : await LifeShareComment.count({ where: { postId, status: 'visible' } });
+  const likedSet = options.likedSet || new Set();
+  const viewCount = Number(row.viewCount || 0);
+  const createdAt = row.createdAt || new Date();
+  const comments = Array.isArray(options.comments) ? options.comments : undefined;
+
+  return {
+    id: postId,
+    authorUserId: row.authorUserId || '',
+    authorName: author.nickname || '用户',
+    authorAvatar: author.avatar || '',
+    content: row.content || '',
+    images: normalizeLifeShareImages(parseJson(row.images, [])),
+    createdAt: new Date(createdAt).getTime(),
+    createdAtText: formatDateTime(createdAt),
+    ipText: row.ipText || '未知',
+    viewCount: Number.isNaN(viewCount) ? 0 : viewCount,
+    likeCount,
+    commentCount,
+    heatCount: (Number.isNaN(viewCount) ? 0 : viewCount) + likeCount + commentCount,
+    liked: likedSet.has(postId),
+    ...(comments ? { comments } : {})
+  };
 }
 
 function normalizeKitchenState(kitchenId, ownerUserId, state = {}, options = {}) {
@@ -3026,13 +3180,255 @@ app.delete('/api/kitchens/:id/permanent', asyncHandler(async (req, res) => {
   });
 }));
 
+app.get('/api/life-shares', asyncHandler(async (req, res) => {
+  const filter = String(req.query.filter || 'latest').trim();
+  const requestUserId = getOptionalRequestUserId(req, req.query || {});
+  const currentUser = requestUserId ? await findUserByIdOrLoginKey(requestUserId) : null;
+  const currentUserId = currentUser ? String((currentUser.toJSON ? currentUser.toJSON() : currentUser).id || '') : '';
+  const where = { status: 'visible' };
+
+  if (filter === 'mine') {
+    if (!currentUserId) {
+      res.send({ posts: [] });
+      return;
+    }
+    where.authorUserId = currentUserId;
+  }
+
+  if (filter === 'liked') {
+    if (!currentUserId) {
+      res.send({ posts: [] });
+      return;
+    }
+    const likes = await LifeShareLike.findAll({ where: { userId: currentUserId } });
+    const postIds = likes.map(like => String((like.toJSON ? like.toJSON() : like).postId || '')).filter(Boolean);
+    if (!postIds.length) {
+      res.send({ posts: [] });
+      return;
+    }
+    where.id = { [Op.in]: postIds };
+  }
+
+  if (filter === 'commented') {
+    if (!currentUserId) {
+      res.send({ posts: [] });
+      return;
+    }
+    const comments = await LifeShareComment.findAll({ where: { userId: currentUserId, status: 'visible' } });
+    const postIds = Array.from(new Set(comments.map(comment => String((comment.toJSON ? comment.toJSON() : comment).postId || '')).filter(Boolean)));
+    if (!postIds.length) {
+      res.send({ posts: [] });
+      return;
+    }
+    where.id = { [Op.in]: postIds };
+  }
+
+  const rows = await LifeSharePost.findAll({
+    where,
+    order: filter === 'featured'
+      ? [['viewCount', 'DESC'], ['createdAt', 'DESC']]
+      : [['createdAt', 'DESC']]
+  });
+  const postIds = rows.map(row => String((row.toJSON ? row.toJSON() : row).id || ''));
+  const userMap = await buildLifeShareUserMap(rows.map(row => (row.toJSON ? row.toJSON() : row).authorUserId));
+  const likeCountMap = await buildLifeShareLikeCountMap(postIds);
+  const commentCountMap = await buildLifeShareCommentCountMap(postIds);
+  const likedSet = await buildCurrentUserLikedSet(postIds, currentUserId);
+  let posts = await Promise.all(rows.map(row => toClientLifeSharePost(row, {
+    userMap,
+    likeCountMap,
+    commentCountMap,
+    likedSet
+  })));
+
+  if (filter === 'featured') {
+    posts.sort((left, right) => {
+      if (right.heatCount !== left.heatCount) return right.heatCount - left.heatCount;
+      return right.createdAt - left.createdAt;
+    });
+  }
+
+  res.send({ posts });
+}));
+
+app.post('/api/life-shares', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const user = await requireLifeShareUser(req, body);
+  const userRow = user.toJSON ? user.toJSON() : user;
+  const content = String(body.content || '').trim().slice(0, 500);
+  const images = normalizeLifeShareImages(body.images);
+
+  if (!content && images.length === 0) {
+    res.status(400).send({ ok: false, error: 'Invalid content', message: '请输入生活分享内容或添加图片' });
+    return;
+  }
+
+  const post = await LifeSharePost.create({
+    id: makeId('life_post'),
+    authorUserId: userRow.id,
+    content,
+    images: stringifyJson(images, []),
+    ipText: getClientIpText(req),
+    viewCount: 0,
+    status: 'visible'
+  });
+
+  const userMap = await buildLifeShareUserMap([userRow.id]);
+  res.send({
+    ok: true,
+    post: await toClientLifeSharePost(post, { userMap })
+  });
+}));
+
+app.get('/api/life-shares/:id', asyncHandler(async (req, res) => {
+  const postId = String(req.params.id || '').trim();
+  const post = await LifeSharePost.findOne({ where: { id: postId, status: 'visible' } });
+  if (!post) {
+    res.status(404).send({ ok: false, error: 'Post not found', message: '分享内容不存在' });
+    return;
+  }
+
+  const requestUserId = getOptionalRequestUserId(req, req.query || {});
+  const currentUser = requestUserId ? await findUserByIdOrLoginKey(requestUserId) : null;
+  const currentUserId = currentUser ? String((currentUser.toJSON ? currentUser.toJSON() : currentUser).id || '') : '';
+  const comments = await LifeShareComment.findAll({
+    where: { postId, status: 'visible' },
+    order: [['createdAt', 'ASC']]
+  });
+  const postRow = post.toJSON ? post.toJSON() : post;
+  const commentUserIds = comments.map(comment => (comment.toJSON ? comment.toJSON() : comment).userId);
+  const userMap = await buildLifeShareUserMap([postRow.authorUserId].concat(commentUserIds));
+  const likeCountMap = await buildLifeShareLikeCountMap([postId]);
+  const commentCountMap = await buildLifeShareCommentCountMap([postId]);
+  const likedSet = await buildCurrentUserLikedSet([postId], currentUserId);
+  const clientComments = await Promise.all(comments.map(comment => toClientLifeShareComment(comment, userMap)));
+
+  res.send({
+    post: await toClientLifeSharePost(post, {
+      userMap,
+      likeCountMap,
+      commentCountMap,
+      likedSet,
+      comments: clientComments
+    })
+  });
+}));
+
+app.post('/api/life-shares/:id/view', asyncHandler(async (req, res) => {
+  const postId = String(req.params.id || '').trim();
+  const post = await LifeSharePost.findOne({ where: { id: postId, status: 'visible' } });
+  if (!post) {
+    res.status(404).send({ ok: false, error: 'Post not found', message: '分享内容不存在' });
+    return;
+  }
+
+  await post.increment('viewCount', { by: 1 });
+  await post.reload();
+  const requestUserId = getOptionalRequestUserId(req, req.body || {});
+  const currentUser = requestUserId ? await findUserByIdOrLoginKey(requestUserId) : null;
+  const currentUserId = currentUser ? String((currentUser.toJSON ? currentUser.toJSON() : currentUser).id || '') : '';
+  const postRow = post.toJSON ? post.toJSON() : post;
+  const userMap = await buildLifeShareUserMap([postRow.authorUserId]);
+  const likeCountMap = await buildLifeShareLikeCountMap([postId]);
+  const commentCountMap = await buildLifeShareCommentCountMap([postId]);
+  const likedSet = await buildCurrentUserLikedSet([postId], currentUserId);
+  res.send({
+    ok: true,
+    post: await toClientLifeSharePost(post, {
+      userMap,
+      likeCountMap,
+      commentCountMap,
+      likedSet
+    })
+  });
+}));
+
+app.post('/api/life-shares/:id/like', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const postId = String(req.params.id || '').trim();
+  const post = await LifeSharePost.findOne({ where: { id: postId, status: 'visible' } });
+  if (!post) {
+    res.status(404).send({ ok: false, error: 'Post not found', message: '分享内容不存在' });
+    return;
+  }
+  const user = await requireLifeShareUser(req, body);
+  const userId = String((user.toJSON ? user.toJSON() : user).id || '');
+  const likeId = `${postId}:${userId}`;
+  const existing = await LifeShareLike.findByPk(likeId);
+  let liked = false;
+  if (existing) {
+    await existing.destroy();
+  } else {
+    await LifeShareLike.create({ id: likeId, postId, userId });
+    liked = true;
+  }
+
+  const postRow = post.toJSON ? post.toJSON() : post;
+  const userMap = await buildLifeShareUserMap([postRow.authorUserId]);
+  const likeCountMap = await buildLifeShareLikeCountMap([postId]);
+  const commentCountMap = await buildLifeShareCommentCountMap([postId]);
+  const likedSet = liked ? new Set([postId]) : new Set();
+  res.send({
+    ok: true,
+    liked,
+    post: await toClientLifeSharePost(post, {
+      userMap,
+      likeCountMap,
+      commentCountMap,
+      likedSet
+    })
+  });
+}));
+
+app.post('/api/life-shares/:id/comments', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const postId = String(req.params.id || '').trim();
+  const post = await LifeSharePost.findOne({ where: { id: postId, status: 'visible' } });
+  if (!post) {
+    res.status(404).send({ ok: false, error: 'Post not found', message: '分享内容不存在' });
+    return;
+  }
+  const user = await requireLifeShareUser(req, body);
+  const userId = String((user.toJSON ? user.toJSON() : user).id || '');
+  const content = String(body.content || '').trim().slice(0, 300);
+  if (!content) {
+    res.status(400).send({ ok: false, error: 'Invalid comment', message: '请输入评论内容' });
+    return;
+  }
+
+  const comment = await LifeShareComment.create({
+    id: makeId('life_comment'),
+    postId,
+    userId,
+    content,
+    status: 'visible'
+  });
+  const postRow = post.toJSON ? post.toJSON() : post;
+  const userMap = await buildLifeShareUserMap([postRow.authorUserId, userId]);
+  const clientComment = await toClientLifeShareComment(comment, userMap);
+  const likeCountMap = await buildLifeShareLikeCountMap([postId]);
+  const commentCountMap = await buildLifeShareCommentCountMap([postId]);
+  const likedSet = await buildCurrentUserLikedSet([postId], userId);
+
+  res.send({
+    ok: true,
+    comment: clientComment,
+    post: await toClientLifeSharePost(post, {
+      userMap,
+      likeCountMap,
+      commentCountMap,
+      likedSet
+    })
+  });
+}));
+
 app.use((err, req, res, next) => {
   console.error('接口执行失败', err);
   const statusCode = err.statusCode || err.status || 500;
   res.status(statusCode).send({
     ok: false,
     error: err.name || 'Error',
-    message: err.message || 'server error'
+    message: err.clientMessage || err.message || 'server error'
   });
 });
 
