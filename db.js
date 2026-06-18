@@ -258,6 +258,10 @@ const LifeSharePost = sequelize.define('JrshLifeSharePost', {
     allowNull: true,
     defaultValue: '未知'
   },
+  ipAddress: {
+    type: DataTypes.STRING(64),
+    allowNull: true
+  },
   viewCount: {
     type: DataTypes.INTEGER,
     allowNull: false,
@@ -357,6 +361,8 @@ async function ensureRequiredColumns() {
 
   await addColumnIfMissing('JrshDish', 'sortIndex', 'INTEGER NOT NULL DEFAULT 0');
   await addColumnIfMissing('JrshDish', 'payload', 'LONGTEXT NULL');
+
+  await addColumnIfMissing('JrshLifeSharePost', 'ipAddress', 'VARCHAR(64) NULL');
 }
 
 async function ensureUtf8mb4() {

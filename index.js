@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
@@ -1549,45 +1550,14 @@ const GEOIP_CHINA_REGION_MAP = {
   82: '澳门'
 };
 
-const GEOIP_CHINA_REGION_CENTERS = [
-  ['北京', 39.9042, 116.4074],
-  ['天津', 39.3434, 117.3616],
-  ['河北', 38.0428, 114.5149],
-  ['山西', 37.8706, 112.5489],
-  ['内蒙古', 40.8175, 111.7652],
-  ['辽宁', 41.8057, 123.4315],
-  ['吉林', 43.8171, 125.3235],
-  ['黑龙江', 45.8038, 126.5349],
-  ['上海', 31.2304, 121.4737],
-  ['江苏', 32.0603, 118.7969],
-  ['浙江', 30.2741, 120.1551],
-  ['安徽', 31.8206, 117.2272],
-  ['福建', 26.0745, 119.2965],
-  ['江西', 28.6829, 115.8582],
-  ['山东', 36.6512, 117.1201],
-  ['河南', 34.7466, 113.6254],
-  ['湖北', 30.5928, 114.3055],
-  ['湖南', 28.2282, 112.9388],
-  ['广东', 23.1291, 113.2644],
-  ['广西', 22.8170, 108.3669],
-  ['海南', 20.0444, 110.1999],
-  ['重庆', 29.5630, 106.5516],
-  ['四川', 30.5728, 104.0668],
-  ['贵州', 26.6470, 106.6302],
-  ['云南', 25.0389, 102.7183],
-  ['西藏', 29.6520, 91.1721],
-  ['陕西', 34.3416, 108.9398],
-  ['甘肃', 36.0611, 103.8343],
-  ['青海', 36.6171, 101.7782],
-  ['宁夏', 38.4872, 106.2309],
-  ['新疆', 43.8256, 87.6168],
-  ['台湾', 25.0330, 121.5654],
-  ['香港', 22.3193, 114.1694],
-  ['澳门', 22.1987, 113.5439]
-];
+const IP2REGION_XDB_HEADER_LENGTH = 256;
+const IP2REGION_XDB_VECTOR_INDEX_LENGTH = 256 * 256 * 8;
+const IP2REGION_XDB_SEGMENT_INDEX_SIZE = 14;
 
 let offlineIpRanges = null;
 let geoipLiteModule;
+let ip2RegionXdbBuffer;
+const onlineIpRegionCache = new Map();
 
 function getGeoipLiteModule() {
   if (geoipLiteModule !== undefined) return geoipLiteModule;
@@ -1606,35 +1576,195 @@ function normalizeGeoipRegionCode(value) {
     .toUpperCase();
 }
 
-function degreesToRadians(value) {
-  return value * Math.PI / 180;
-}
-
-function getGeoDistanceKm(lat1, lon1, lat2, lon2) {
-  const earthRadiusKm = 6371;
-  const dLat = degreesToRadians(lat2 - lat1);
-  const dLon = degreesToRadians(lon2 - lon1);
-  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2)
-    + Math.cos(degreesToRadians(lat1)) * Math.cos(degreesToRadians(lat2))
-    * Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function lookupNearestChinaRegionByLocation(location) {
-  if (!Array.isArray(location) || location.length < 2) return '';
-  const lat = Number(location[0]);
-  const lon = Number(location[1]);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return '';
-  let nearestRegion = '';
-  let nearestDistance = Infinity;
-  GEOIP_CHINA_REGION_CENTERS.forEach(([region, centerLat, centerLon]) => {
-    const distance = getGeoDistanceKm(lat, lon, centerLat, centerLon);
-    if (distance < nearestDistance) {
-      nearestDistance = distance;
-      nearestRegion = region;
+function getGeoipCountryName(countryCode) {
+  const code = String(countryCode || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return '';
+  const fallbackNames = {
+    CN: '中国',
+    HK: '香港',
+    MO: '澳门',
+    TW: '台湾',
+    US: '美国',
+    CA: '加拿大',
+    GB: '英国',
+    JP: '日本',
+    KR: '韩国',
+    SG: '新加坡',
+    TH: '泰国',
+    MY: '马来西亚',
+    AU: '澳大利亚',
+    NZ: '新西兰',
+    DE: '德国',
+    FR: '法国',
+    IT: '意大利',
+    ES: '西班牙',
+    RU: '俄罗斯',
+    IN: '印度',
+    BR: '巴西'
+  };
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.DisplayNames === 'function') {
+      return new Intl.DisplayNames(['zh-CN'], { type: 'region' }).of(code) || fallbackNames[code] || code;
     }
+  } catch (err) {
+    // Some older Node runtimes do not include Intl.DisplayNames.
+  }
+  return fallbackNames[code] || code;
+}
+
+function normalizeIpRegionPart(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '0' || text === '未知') return '';
+  return text;
+}
+
+function parseIp2RegionText(regionText) {
+  const parts = String(regionText || '').split('|').map(normalizeIpRegionPart);
+  const country = parts[0] || '';
+  const province = parts[2] || '';
+  if (country === '中国') {
+    return normalizeProvinceName(province);
+  }
+  return country;
+}
+
+function readJsonFromHttps(url, timeoutMs = 1800, redirectCount = 0) {
+  return new Promise(resolve => {
+    const req = https.get(url, { timeout: timeoutMs }, res => {
+      const statusCode = Number(res.statusCode || 0);
+      const location = res.headers && res.headers.location;
+      if (statusCode >= 300 && statusCode < 400 && location && redirectCount < 2) {
+        res.resume();
+        resolve(readJsonFromHttps(new URL(location, url).toString(), timeoutMs, redirectCount + 1));
+        return;
+      }
+      if (statusCode < 200 || statusCode >= 300) {
+        res.resume();
+        resolve(null);
+        return;
+      }
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => {
+        body += chunk;
+        if (body.length > 1024 * 1024) req.destroy();
+      });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (err) {
+          resolve(null);
+        }
+      });
+    });
+    req.on('timeout', () => req.destroy());
+    req.on('error', () => resolve(null));
   });
-  return nearestRegion;
+}
+
+function formatOnlineRegionResult(country, province) {
+  const countryText = normalizeIpRegionPart(country);
+  const provinceText = normalizeProvinceName(province);
+  if (!countryText) return '';
+  if (countryText === '中国') return provinceText;
+  return countryText;
+}
+
+function parseBaiduIpRegionResponse(payload) {
+  const data = payload && payload.data ? payload.data : null;
+  if (!data) return '';
+  return formatOnlineRegionResult(
+    data.country,
+    data.prov || data.province || data.region
+  );
+}
+
+function parseVoreIpRegionResponse(payload) {
+  const data = payload && payload.ipdata ? payload.ipdata : null;
+  if (!data) return '';
+  return formatOnlineRegionResult(
+    data.info1 || data.country,
+    data.info2 || data.province || data.region
+  );
+}
+
+async function lookupOnlineIpRegion(ip) {
+  if (!isPublicIpv4(ip)) return '';
+  if (onlineIpRegionCache.has(ip)) return onlineIpRegionCache.get(ip);
+
+  const encodedIp = encodeURIComponent(ip);
+  const providers = [
+    {
+      url: `https://qifu-api.baidubce.com/ip/geo/v1/district?ip=${encodedIp}`,
+      parse: parseBaiduIpRegionResponse
+    },
+    {
+      url: `https://api.vore.top/api/IPdata?ip=${encodedIp}`,
+      parse: parseVoreIpRegionResponse
+    }
+  ];
+
+  for (const provider of providers) {
+    const payload = await readJsonFromHttps(provider.url);
+    const region = provider.parse(payload);
+    if (region) {
+      onlineIpRegionCache.set(ip, region);
+      return region;
+    }
+  }
+
+  onlineIpRegionCache.set(ip, '');
+  return '';
+}
+
+function loadIp2RegionXdbBuffer() {
+  if (ip2RegionXdbBuffer !== undefined) return ip2RegionXdbBuffer;
+  const filePath = path.join(__dirname, 'ip2region.xdb');
+  try {
+    const buffer = fs.readFileSync(filePath);
+    ip2RegionXdbBuffer = buffer.length > IP2REGION_XDB_HEADER_LENGTH + IP2REGION_XDB_VECTOR_INDEX_LENGTH
+      ? buffer
+      : null;
+  } catch (err) {
+    ip2RegionXdbBuffer = null;
+  }
+  return ip2RegionXdbBuffer;
+}
+
+function lookupIp2RegionXdb(ip) {
+  if (!isPublicIpv4(ip)) return '';
+  const ipNumber = ipv4ToNumber(ip);
+  const buffer = loadIp2RegionXdbBuffer();
+  if (ipNumber === null || !buffer) return '';
+
+  const firstByte = (ipNumber >>> 24) & 0xff;
+  const secondByte = (ipNumber >>> 16) & 0xff;
+  const vectorOffset = IP2REGION_XDB_HEADER_LENGTH + ((firstByte * 256 + secondByte) * 8);
+  if (vectorOffset + 8 > buffer.length) return '';
+
+  const startPtr = buffer.readUInt32LE(vectorOffset);
+  const endPtr = buffer.readUInt32LE(vectorOffset + 4);
+  if (startPtr <= 0 || endPtr <= 0 || startPtr > endPtr || endPtr + IP2REGION_XDB_SEGMENT_INDEX_SIZE > buffer.length) return '';
+
+  let left = 0;
+  let right = Math.floor((endPtr - startPtr) / IP2REGION_XDB_SEGMENT_INDEX_SIZE);
+  while (left <= right) {
+    const mid = Math.floor((left + right) / 2);
+    const segmentOffset = startPtr + mid * IP2REGION_XDB_SEGMENT_INDEX_SIZE;
+    const startIp = buffer.readUInt32LE(segmentOffset);
+    const endIp = buffer.readUInt32LE(segmentOffset + 4);
+    if (ipNumber < startIp) {
+      right = mid - 1;
+    } else if (ipNumber > endIp) {
+      left = mid + 1;
+    } else {
+      const dataLength = buffer.readUInt16LE(segmentOffset + 8);
+      const dataPtr = buffer.readUInt32LE(segmentOffset + 10);
+      if (dataLength <= 0 || dataPtr <= 0 || dataPtr + dataLength > buffer.length) return '';
+      return parseIp2RegionText(buffer.toString('utf8', dataPtr, dataPtr + dataLength));
+    }
+  }
+  return '';
 }
 
 function lookupGeoipLiteRegion(ip) {
@@ -1642,13 +1772,14 @@ function lookupGeoipLiteRegion(ip) {
   const geoip = getGeoipLiteModule();
   if (!geoip || typeof geoip.lookup !== 'function') return '';
   const result = geoip.lookup(ip);
-  if (!result || result.country !== 'CN') return '';
+  if (!result || !result.country) return '';
+  if (result.country !== 'CN') return getGeoipCountryName(result.country);
   const region = GEOIP_CHINA_REGION_MAP[normalizeGeoipRegionCode(result.region)];
   if (region) return region;
   if (/^[\u4e00-\u9fa5]{2,8}$/.test(String(result.city || '').trim())) {
     return normalizeProvinceName(result.city) || '';
   }
-  return lookupNearestChinaRegionByLocation(result.ll);
+  return '';
 }
 
 function ipv4ToNumber(ip) {
@@ -1678,8 +1809,8 @@ function loadOfflineIpRanges() {
 
 function lookupOfflineIpRegion(ip) {
   if (!isPublicIpv4(ip)) return '';
-  const geoipRegion = lookupGeoipLiteRegion(ip);
-  if (geoipRegion) return geoipRegion;
+  const ip2Region = lookupIp2RegionXdb(ip);
+  if (ip2Region) return ip2Region;
   const ipNumber = ipv4ToNumber(ip);
   if (ipNumber === null) return '';
   const ranges = loadOfflineIpRanges();
@@ -1696,20 +1827,22 @@ function lookupOfflineIpRegion(ip) {
       return item.region;
     }
   }
-  return '';
+  return lookupGeoipLiteRegion(ip);
 }
 
 async function resolveIpRegionText(value) {
   const text = String(value || '').trim();
   if (!text || text === '未知') return '未知';
   if (/^[\u4e00-\u9fa5]{2,8}$/.test(text)) return normalizeProvinceName(text) || '未知';
+  const onlineRegion = await lookupOnlineIpRegion(text);
+  if (onlineRegion) return onlineRegion;
   return lookupOfflineIpRegion(text) || '未知';
 }
 
-async function getClientRegionText(req) {
+async function getClientRegionText(req, ipAddress = '') {
   const headerRegion = getClientRegionHeaderText(req);
   if (headerRegion) return normalizeProvinceName(headerRegion) || headerRegion;
-  return resolveIpRegionText(getClientIpText(req));
+  return resolveIpRegionText(ipAddress || getClientIpText(req));
 }
 
 function normalizeLifeShareImages(images) {
@@ -1794,6 +1927,11 @@ async function toClientLifeSharePost(post, options = {}) {
   const viewCount = Number(row.viewCount || 0);
   const createdAt = row.createdAt || new Date();
   const comments = Array.isArray(options.comments) ? options.comments : undefined;
+  const storedIpText = String(row.ipText || '').trim();
+  const storedIpAddress = String(row.ipAddress || '').trim();
+  const ipRegionSource = storedIpAddress && (!storedIpText || storedIpText === '未知' || storedIpText === '中国' || isPublicIpv4(storedIpText))
+    ? storedIpAddress
+    : (storedIpText || '未知');
 
   return {
     id: postId,
@@ -1804,7 +1942,7 @@ async function toClientLifeSharePost(post, options = {}) {
     images: normalizeLifeShareImages(parseJson(row.images, [])),
     createdAt: new Date(createdAt).getTime(),
     createdAtText: formatDateTime(createdAt),
-    ipText: await resolveIpRegionText(row.ipText || '未知'),
+    ipText: await resolveIpRegionText(ipRegionSource),
     viewCount: Number.isNaN(viewCount) ? 0 : viewCount,
     likeCount,
     commentCount,
@@ -3533,12 +3671,14 @@ app.post('/api/life-shares', asyncHandler(async (req, res) => {
     return;
   }
 
+  const ipAddress = getClientIpText(req);
   const post = await LifeSharePost.create({
     id: makeId('life_post'),
     authorUserId: userRow.id,
     content,
     images: stringifyJson(images, []),
-    ipText: await getClientRegionText(req),
+    ipText: await getClientRegionText(req, ipAddress),
+    ipAddress: ipAddress === '未知' ? '' : ipAddress,
     viewCount: 0,
     status: 'visible'
   });
