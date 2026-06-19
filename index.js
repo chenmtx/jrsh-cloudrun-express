@@ -1984,6 +1984,11 @@ async function toClientLifeShareComment(comment, userMap = {}, parentCommentMap 
   const parentComment = parentCommentMap[String(row.parentCommentId || '')] || {};
   const parentUser = userMap[String(parentComment.userId || '')] || {};
   const createdAt = row.createdAt || new Date();
+  const storedIpText = String(row.ipText || '').trim();
+  const storedIpAddress = String(row.ipAddress || '').trim();
+  const ipText = storedIpAddress || storedIpText
+    ? await resolveIpRegionText(storedIpAddress || storedIpText)
+    : '';
   return {
     id: row.id,
     postId: row.postId,
@@ -1994,7 +1999,8 @@ async function toClientLifeShareComment(comment, userMap = {}, parentCommentMap 
     userAvatar: user.avatar || '',
     content: row.content || '',
     createdAt: new Date(createdAt).getTime(),
-    createdAtText: formatDateTime(createdAt)
+    createdAtText: formatDateTime(createdAt),
+    ipText
   };
 }
 
@@ -4053,12 +4059,16 @@ app.post('/api/life-shares/:id/comments', asyncHandler(async (req, res) => {
     }
   }
 
+  const ipAddress = getClientIpText(req);
+  const ipText = await getClientRegionText(req, ipAddress);
   const comment = await LifeShareComment.create({
     id: makeId('life_comment'),
     postId,
     userId,
     parentCommentId: parentCommentId || null,
     content,
+    ipText,
+    ipAddress: ipAddress === '未知' ? '' : ipAddress,
     status: 'visible'
   });
   const postRow = post.toJSON ? post.toJSON() : post;

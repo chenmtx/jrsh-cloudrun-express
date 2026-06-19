@@ -295,6 +295,15 @@ const LifeShareComment = sequelize.define('JrshLifeShareComment', {
     type: DataTypes.STRING(300),
     allowNull: false
   },
+  ipText: {
+    type: DataTypes.STRING(64),
+    allowNull: true,
+    defaultValue: '未知'
+  },
+  ipAddress: {
+    type: DataTypes.STRING(64),
+    allowNull: true
+  },
   status: {
     type: DataTypes.STRING(32),
     allowNull: false,
@@ -413,6 +422,8 @@ async function ensureRequiredColumns() {
 
   await addColumnIfMissing('JrshLifeSharePost', 'ipAddress', 'VARCHAR(64) NULL');
   await addColumnIfMissing('JrshLifeShareComment', 'parentCommentId', 'VARCHAR(128) NULL');
+  await addColumnIfMissing('JrshLifeShareComment', 'ipText', 'VARCHAR(64) NULL');
+  await addColumnIfMissing('JrshLifeShareComment', 'ipAddress', 'VARCHAR(64) NULL');
   await addColumnIfMissing('JrshLifeShareNotification', 'readStatus', "VARCHAR(32) NOT NULL DEFAULT 'unread'");
 }
 
