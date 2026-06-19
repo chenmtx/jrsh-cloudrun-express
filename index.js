@@ -2016,7 +2016,7 @@ async function toClientLifeShareComment(comment, userMap = {}, parentCommentMap 
   const storedIpAddress = String(row.ipAddress || '').trim();
   const ipText = storedIpAddress || storedIpText
     ? await resolveIpRegionText(storedIpAddress || storedIpText)
-    : '';
+    : '未知';
   return {
     id: row.id,
     postId: row.postId,
