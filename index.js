@@ -1451,6 +1451,13 @@ function normalizeIpv4Text(value) {
   return match ? match[0] : '';
 }
 
+function normalizeIpv6Text(value) {
+  const text = String(value || '').trim().replace(/^\[|\]$/g, '');
+  if (!text || text.includes('.')) return '';
+  if (!/^[0-9a-fA-F:]+$/.test(text) || !text.includes(':')) return '';
+  return text.toLowerCase();
+}
+
 function isPublicIpv4(value) {
   const parts = String(value || '').trim().split('.').map(part => Number(part));
   if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
@@ -1462,11 +1469,19 @@ function isPublicIpv4(value) {
   return true;
 }
 
+function isPublicIpv6(value) {
+  const text = normalizeIpv6Text(value);
+  if (!text || text === '::1' || text === '::') return false;
+  if (text.startsWith('fc') || text.startsWith('fd')) return false;
+  if (text.startsWith('fe8') || text.startsWith('fe9') || text.startsWith('fea') || text.startsWith('feb')) return false;
+  return true;
+}
+
 function getHeaderIpCandidates(value) {
   const raw = Array.isArray(value) ? value.join(',') : String(value || '');
   return raw
     .split(',')
-    .map(normalizeIpv4Text)
+    .map(item => normalizeIpv4Text(item) || normalizeIpv6Text(item))
     .filter(Boolean);
 }
 
@@ -1481,7 +1496,7 @@ function getClientIpText(req) {
     normalizeIpv4Text(req.ip)
   ].filter(Boolean);
 
-  const publicIp = candidates.find(isPublicIpv4);
+  const publicIp = candidates.find(ip => isPublicIpv4(ip) || isPublicIpv6(ip));
   return (publicIp || candidates[0] || '未知').slice(0, 64);
 }
 
@@ -1583,6 +1598,45 @@ const GEOIP_CHINA_REGION_MAP = {
   82: '澳门'
 };
 
+const CHINA_REGION_EN_MAP = {
+  BEIJING: '北京',
+  TIANJIN: '天津',
+  HEBEI: '河北',
+  SHANXI: '山西',
+  INNERMONGOLIA: '内蒙古',
+  LIAONING: '辽宁',
+  JILIN: '吉林',
+  HEILONGJIANG: '黑龙江',
+  SHANGHAI: '上海',
+  JIANGSU: '江苏',
+  ZHEJIANG: '浙江',
+  ANHUI: '安徽',
+  FUJIAN: '福建',
+  JIANGXI: '江西',
+  SHANDONG: '山东',
+  HENAN: '河南',
+  HUBEI: '湖北',
+  HUNAN: '湖南',
+  GUANGDONG: '广东',
+  GUANGXI: '广西',
+  HAINAN: '海南',
+  CHONGQING: '重庆',
+  SICHUAN: '四川',
+  GUIZHOU: '贵州',
+  YUNNAN: '云南',
+  XIZANG: '西藏',
+  TIBET: '西藏',
+  SHAANXI: '陕西',
+  GANSU: '甘肃',
+  QINGHAI: '青海',
+  NINGXIA: '宁夏',
+  XINJIANG: '新疆',
+  TAIWAN: '台湾',
+  HONGKONG: '香港',
+  MACAO: '澳门',
+  MACAU: '澳门'
+};
+
 const IP2REGION_XDB_HEADER_LENGTH = 256;
 const IP2REGION_XDB_VECTOR_INDEX_LENGTH = 256 * 256 * 8;
 const IP2REGION_XDB_SEGMENT_INDEX_SIZE = 14;
@@ -1661,10 +1715,21 @@ function parseIp2RegionText(regionText) {
   return country;
 }
 
+function normalizeEnglishChinaRegion(value) {
+  const key = String(value || '').replace(/[^a-zA-Z]/g, '').toUpperCase();
+  return CHINA_REGION_EN_MAP[key] || '';
+}
+
 function readJsonFromUrl(url, timeoutMs = 1800, redirectCount = 0) {
   return new Promise(resolve => {
     const client = String(url || '').startsWith('https:') ? https : http;
-    const req = client.get(url, { timeout: timeoutMs }, res => {
+    const req = client.get(url, {
+      timeout: timeoutMs,
+      headers: {
+        'user-agent': 'Mozilla/5.0 JrshMiniGame/1.0',
+        accept: 'application/json,text/plain,*/*'
+      }
+    }, res => {
       const statusCode = Number(res.statusCode || 0);
       const location = res.headers && res.headers.location;
       if (statusCode >= 300 && statusCode < 400 && location && redirectCount < 2) {
@@ -1696,6 +1761,35 @@ function readJsonFromUrl(url, timeoutMs = 1800, redirectCount = 0) {
   });
 }
 
+function parseZxincRegionText(value) {
+  const parts = String(value || '')
+    .split(/[\t\s]+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+  const country = parts[0] || '';
+  if (!country || country === '0' || country === '未知') return '';
+  if (country !== '中国') return country;
+  const province = parts.find(part => /(?:省|市|自治区|特别行政区)$/.test(part) && part !== '中国');
+  return normalizeProvinceName(province) || '';
+}
+
+function parseZxincRegionResponse(payload) {
+  const data = payload && payload.data;
+  if (!payload || payload.code !== 0 || !data) return '';
+  return parseZxincRegionText(data.country || data.location);
+}
+
+function parseIpinfoRegionResponse(payload) {
+  if (!payload || !payload.ip) return '';
+  const countryCode = String(payload.country || '').trim().toUpperCase();
+  const countryName = getGeoipCountryName(countryCode);
+  if (!countryName) return '';
+  if (countryCode !== 'CN') return countryName;
+  return normalizeEnglishChinaRegion(payload.region)
+    || normalizeEnglishChinaRegion(payload.org)
+    || '';
+}
+
 function formatOnlineRegionResult(country, province) {
   const countryText = normalizeIpRegionPart(country);
   const provinceText = normalizeProvinceName(province);
@@ -1713,16 +1807,35 @@ function parseIpApiRegionResponse(payload) {
 }
 
 async function lookupOnlineIpRegion(ip) {
-  if (!isPublicIpv4(ip)) return '';
+  if (!isPublicIpv4(ip) && !isPublicIpv6(ip)) return '';
   if (onlineIpRegionCache.has(ip)) return onlineIpRegionCache.get(ip);
 
   const encodedIp = encodeURIComponent(ip);
-  const url = `http://ip-api.com/json/${encodedIp}?lang=zh-CN&fields=status,country,countryCode,regionName,query`;
-  const payload = await readJsonFromUrl(url);
-  const region = parseIpApiRegionResponse(payload);
-  if (region) {
-    onlineIpRegionCache.set(ip, region);
-    return region;
+  const lookups = [
+    {
+      url: `http://ip.zxinc.org/api.php?type=json&ip=${encodedIp}`,
+      timeout: 2500,
+      parse: parseZxincRegionResponse
+    },
+    {
+      url: `https://ipinfo.io/${encodedIp}/json`,
+      timeout: 2500,
+      parse: parseIpinfoRegionResponse
+    },
+    {
+      url: `http://ip-api.com/json/${encodedIp}?lang=zh-CN&fields=status,country,countryCode,regionName,query`,
+      timeout: 1800,
+      parse: parseIpApiRegionResponse
+    }
+  ];
+
+  for (const lookup of lookups) {
+    const payload = await readJsonFromUrl(lookup.url, lookup.timeout);
+    const region = lookup.parse(payload);
+    if (region) {
+      onlineIpRegionCache.set(ip, region);
+      return region;
+    }
   }
 
   onlineIpRegionCache.set(ip, '');
