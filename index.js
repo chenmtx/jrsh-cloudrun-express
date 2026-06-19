@@ -16,7 +16,8 @@ const {
   LifeSharePost,
   LifeShareComment,
   LifeShareLike,
-  LifeShareNotification
+  LifeShareNotification,
+  FriendRelation
 } = require('./db');
 
 const app = express();
@@ -1433,6 +1434,90 @@ async function requireLifeShareUser(req, body = {}) {
   return user;
 }
 
+async function requireRequestUser(req, body = {}) {
+  const userId = getOptionalRequestUserId(req, body);
+  const user = await findUserByIdOrLoginKey(userId);
+  if (!user) {
+    const err = new Error('User not found');
+    err.statusCode = 401;
+    err.clientMessage = '请先登录后再操作';
+    throw err;
+  }
+  return user;
+}
+
+function getUserPublicSummary(user) {
+  const row = user && user.toJSON ? user.toJSON() : (user || {});
+  return {
+    id: String(row.id || ''),
+    nickname: row.nickname || '用户',
+    avatar: row.avatar || ''
+  };
+}
+
+function getFriendRelationQuery(leftUserId, rightUserId, statuses = ['pending', 'accepted']) {
+  return {
+    status: { [Op.in]: statuses },
+    [Op.or]: [
+      { requesterUserId: leftUserId, receiverUserId: rightUserId },
+      { requesterUserId: rightUserId, receiverUserId: leftUserId }
+    ]
+  };
+}
+
+async function findFriendRelation(leftUserId, rightUserId, statuses = ['pending', 'accepted']) {
+  return FriendRelation.findOne({
+    where: getFriendRelationQuery(leftUserId, rightUserId, statuses),
+    order: [['updatedAt', 'DESC'], ['createdAt', 'DESC']]
+  });
+}
+
+function getFriendRelationStatus(relation, currentUserId) {
+  if (!relation) return 'none';
+  const row = relation.toJSON ? relation.toJSON() : relation;
+  if (row.status === 'accepted') return 'accepted';
+  if (row.status === 'pending') {
+    return String(row.requesterUserId) === String(currentUserId) ? 'pending_sent' : 'pending_received';
+  }
+  return 'none';
+}
+
+async function countPublicKitchensForUser(userId) {
+  const kitchens = await Kitchen.findAll({
+    attributes: ['id', 'ownerUserId', 'kitchenInfo', 'isPublic', 'dissolvedAt'],
+    where: { ownerUserId: userId, dissolvedAt: null }
+  });
+  const summaries = await Promise.all(kitchens.map(toClientKitchenSummary));
+  return summaries.filter(kitchen => kitchen.isPublic).length;
+}
+
+async function toClientFriendRelation(relation, currentUserId, userMap = {}) {
+  const row = relation && relation.toJSON ? relation.toJSON() : (relation || {});
+  const friendUserId = String(row.requesterUserId) === String(currentUserId)
+    ? String(row.receiverUserId || '')
+    : String(row.requesterUserId || '');
+  const friend = userMap[friendUserId] || await User.findByPk(friendUserId);
+  return {
+    id: row.id || '',
+    status: row.status || '',
+    createdAt: row.createdAt ? new Date(row.createdAt).getTime() : Date.now(),
+    updatedAt: row.updatedAt ? new Date(row.updatedAt).getTime() : Date.now(),
+    friend: getUserPublicSummary(friend),
+    publicKitchenCount: await countPublicKitchensForUser(friendUserId)
+  };
+}
+
+async function toClientFriendRequest(relation, userMap = {}) {
+  const row = relation && relation.toJSON ? relation.toJSON() : (relation || {});
+  const requester = userMap[row.requesterUserId] || await User.findByPk(row.requesterUserId);
+  return {
+    id: row.id || '',
+    status: row.status || '',
+    createdAt: row.createdAt ? new Date(row.createdAt).getTime() : Date.now(),
+    requester: getUserPublicSummary(requester)
+  };
+}
+
 function getClientRegionHeaderText(req) {
   const raw = req.headers['x-wx-client-province']
     || req.headers['x-client-province']
@@ -2798,6 +2883,213 @@ app.post('/api/cabbage/transfer', asyncHandler(async (req, res) => {
     amount: formatCabbageNumberText(transferAmount, 0),
     sender: await toClientUserWithDecoratedHistory(sender),
     recipient: await toClientUserWithDecoratedHistory(recipient)
+  });
+}));
+
+app.post('/api/friends/search', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const currentUser = await requireRequestUser(req, body);
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const keyword = String(body.keyword || body.friendCode || body.targetUserId || '').trim();
+  if (!keyword) {
+    res.status(400).send({ ok: false, error: 'Keyword required', message: '请输入好友码' });
+    return;
+  }
+
+  const target = await findUserByIdOrLoginKey(keyword);
+  if (!target) {
+    res.status(404).send({ ok: false, error: 'User not found', message: '没有找到这个用户' });
+    return;
+  }
+
+  const targetRow = target.toJSON ? target.toJSON() : target;
+  const relation = String(targetRow.id) === String(currentRow.id)
+    ? null
+    : await findFriendRelation(currentRow.id, targetRow.id);
+  res.send({
+    ok: true,
+    user: getUserPublicSummary(target),
+    relationId: relation ? (relation.toJSON ? relation.toJSON() : relation).id : '',
+    relationStatus: String(targetRow.id) === String(currentRow.id)
+      ? 'self'
+      : getFriendRelationStatus(relation, currentRow.id)
+  });
+}));
+
+app.get('/api/friends', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.query || {});
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const userId = String(currentRow.id || '');
+  const relations = await FriendRelation.findAll({
+    where: {
+      status: 'accepted',
+      [Op.or]: [
+        { requesterUserId: userId },
+        { receiverUserId: userId }
+      ]
+    },
+    order: [['updatedAt', 'DESC'], ['createdAt', 'DESC']]
+  });
+  const friendIds = Array.from(new Set(relations.map(relation => {
+    const row = relation.toJSON ? relation.toJSON() : relation;
+    return String(row.requesterUserId) === userId ? row.receiverUserId : row.requesterUserId;
+  }).filter(Boolean)));
+  const users = friendIds.length ? await User.findAll({ where: { id: { [Op.in]: friendIds } } }) : [];
+  const userMap = users.reduce((map, user) => {
+    const row = user.toJSON ? user.toJSON() : user;
+    map[String(row.id)] = user;
+    return map;
+  }, {});
+  const pendingCount = await FriendRelation.count({ where: { receiverUserId: userId, status: 'pending' } });
+  res.send({
+    ok: true,
+    pendingCount,
+    friends: await Promise.all(relations.map(relation => toClientFriendRelation(relation, userId, userMap)))
+  });
+}));
+
+app.get('/api/friend-requests', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.query || {});
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const userId = String(currentRow.id || '');
+  const requests = await FriendRelation.findAll({
+    where: { receiverUserId: userId, status: 'pending' },
+    order: [['createdAt', 'DESC'], ['id', 'DESC']]
+  });
+  const requesterIds = Array.from(new Set(requests.map(relation => {
+    const row = relation.toJSON ? relation.toJSON() : relation;
+    return row.requesterUserId;
+  }).filter(Boolean)));
+  const users = requesterIds.length ? await User.findAll({ where: { id: { [Op.in]: requesterIds } } }) : [];
+  const userMap = users.reduce((map, user) => {
+    const row = user.toJSON ? user.toJSON() : user;
+    map[String(row.id)] = user;
+    return map;
+  }, {});
+  res.send({
+    ok: true,
+    requests: await Promise.all(requests.map(relation => toClientFriendRequest(relation, userMap)))
+  });
+}));
+
+app.post('/api/friend-requests', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const currentUser = await requireRequestUser(req, body);
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const currentUserId = String(currentRow.id || '');
+  const targetUserId = String(body.targetUserId || body.friendUserId || '').trim();
+  const target = await findUserByIdOrLoginKey(targetUserId);
+  if (!target) {
+    res.status(404).send({ ok: false, error: 'User not found', message: '没有找到这个用户' });
+    return;
+  }
+
+  const targetRow = target.toJSON ? target.toJSON() : target;
+  if (String(targetRow.id) === currentUserId) {
+    res.status(400).send({ ok: false, error: 'Cannot add self', message: '不能添加自己' });
+    return;
+  }
+
+  const existing = await findFriendRelation(currentUserId, targetRow.id, ['pending', 'accepted', 'rejected', 'deleted']);
+  if (existing) {
+    const existingRow = existing.toJSON ? existing.toJSON() : existing;
+    if (existingRow.status === 'accepted') {
+      res.send({ ok: true, relationStatus: 'accepted', request: existingRow });
+      return;
+    }
+    if (existingRow.status === 'pending') {
+      res.send({
+        ok: true,
+        relationStatus: String(existingRow.requesterUserId) === currentUserId ? 'pending_sent' : 'pending_received',
+        request: existingRow
+      });
+      return;
+    }
+    await existing.update({
+      requesterUserId: currentUserId,
+      receiverUserId: String(targetRow.id),
+      status: 'pending'
+    });
+    res.send({ ok: true, relationStatus: 'pending_sent', request: existing.toJSON ? existing.toJSON() : existing });
+    return;
+  }
+
+  const requestRow = await FriendRelation.create({
+    id: makeId('friend_req'),
+    requesterUserId: currentUserId,
+    receiverUserId: String(targetRow.id),
+    status: 'pending'
+  });
+  res.send({ ok: true, relationStatus: 'pending_sent', request: requestRow.toJSON ? requestRow.toJSON() : requestRow });
+}));
+
+app.post('/api/friend-requests/:id/accept', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.body || {});
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const requestRow = await FriendRelation.findOne({
+    where: {
+      id: String(req.params.id || '').trim(),
+      receiverUserId: String(currentRow.id || ''),
+      status: 'pending'
+    }
+  });
+  if (!requestRow) {
+    res.status(404).send({ ok: false, error: 'Request not found', message: '好友申请不存在' });
+    return;
+  }
+  await requestRow.update({ status: 'accepted' });
+  res.send({ ok: true, request: requestRow.toJSON ? requestRow.toJSON() : requestRow });
+}));
+
+app.post('/api/friend-requests/:id/reject', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.body || {});
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const requestRow = await FriendRelation.findOne({
+    where: {
+      id: String(req.params.id || '').trim(),
+      receiverUserId: String(currentRow.id || ''),
+      status: 'pending'
+    }
+  });
+  if (!requestRow) {
+    res.status(404).send({ ok: false, error: 'Request not found', message: '好友申请不存在' });
+    return;
+  }
+  await requestRow.update({ status: 'rejected' });
+  res.send({ ok: true, request: requestRow.toJSON ? requestRow.toJSON() : requestRow });
+}));
+
+app.get('/api/friends/:friendUserId/kitchens', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.query || {});
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const currentUserId = String(currentRow.id || '');
+  const friendUserId = String(req.params.friendUserId || '').trim();
+  const friend = await User.findByPk(friendUserId);
+  if (!friend) {
+    res.status(404).send({ ok: false, error: 'Friend not found', message: '好友不存在' });
+    return;
+  }
+  const relation = await findFriendRelation(currentUserId, friendUserId, ['accepted']);
+  if (!relation) {
+    res.status(403).send({ ok: false, error: 'Forbidden', message: '成为好友后才能查看公开厨房' });
+    return;
+  }
+  const kitchens = await Kitchen.findAll({
+    attributes: ['id', 'ownerUserId', 'legacyId', 'kitchenCode', 'kitchenInfo', 'dishes', 'isPublic', 'businessOpen', 'businessStart', 'businessEnd', 'displaySettings', 'createdAt', 'updatedAt', 'dissolvedAt'],
+    where: { ownerUserId: friendUserId, dissolvedAt: null },
+    order: [['updatedAt', 'DESC'], ['id', 'DESC']]
+  });
+  const summaries = (await Promise.all(kitchens.map(toClientKitchenSummary)))
+    .filter(kitchen => kitchen.isPublic)
+    .sort(compareKitchenRecommendation);
+  const friendRow = friend.toJSON ? friend.toJSON() : friend;
+  res.send({
+    ok: true,
+    friend: getUserPublicSummary(friend),
+    kitchens: summaries.map(kitchen => ({
+      ...kitchen,
+      ownerNickname: friendRow.nickname || ''
+    }))
   });
 }));
 

@@ -371,6 +371,26 @@ const LifeShareNotification = sequelize.define('JrshLifeShareNotification', {
   }
 });
 
+const FriendRelation = sequelize.define('JrshFriendRelation', {
+  id: {
+    type: DataTypes.STRING(128),
+    primaryKey: true
+  },
+  requesterUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  receiverUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  status: {
+    type: DataTypes.STRING(32),
+    allowNull: false,
+    defaultValue: 'pending'
+  }
+});
+
 function quoteIdentifier(value) {
   return `\`${String(value || '').replace(/`/g, '``')}\``;
 }
@@ -436,7 +456,8 @@ async function ensureUtf8mb4() {
     'JrshLifeSharePost',
     'JrshLifeShareComment',
     'JrshLifeShareLike',
-    'JrshLifeShareNotification'
+    'JrshLifeShareNotification',
+    'JrshFriendRelation'
   ];
   try {
     await sequelize.query(`ALTER DATABASE ${quoteIdentifier(MYSQL_DATABASE)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
@@ -463,6 +484,7 @@ async function init() {
   await LifeShareComment.sync();
   await LifeShareLike.sync();
   await LifeShareNotification.sync();
+  await FriendRelation.sync();
   await ensureRequiredColumns();
   await ensureUtf8mb4();
 }
@@ -477,5 +499,6 @@ module.exports = {
   LifeSharePost,
   LifeShareComment,
   LifeShareLike,
-  LifeShareNotification
+  LifeShareNotification,
+  FriendRelation
 };
