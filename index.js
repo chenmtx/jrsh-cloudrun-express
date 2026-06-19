@@ -185,9 +185,15 @@ function parseUserCabbageHistory(user, fallbackBalance = 2200.00) {
 
 function toClientUser(user) {
   const row = user && user.toJSON ? user.toJSON() : (user || {});
+  const {
+    dietPlans,
+    dietPlanSettings,
+    dietPlanUpdatedAt,
+    ...safeRow
+  } = row;
   const cabbageBalance = formatCabbageNumberText(row.cabbageBalance, 2200.00);
   return {
-    ...row,
+    ...safeRow,
     signState: ensureMonthlySignState(row),
     cabbageBalance,
     cabbageHistory: parseUserCabbageHistory(row, cabbageBalance)
@@ -1518,6 +1524,87 @@ async function toClientFriendRequest(relation, userMap = {}) {
   };
 }
 
+const DIET_PLAN_MEALS = ['breakfast', 'lunch', 'tea', 'dinner', 'night'];
+const DEFAULT_DIET_PLAN_SETTINGS = DIET_PLAN_MEALS.reduce((settings, key) => {
+  settings[key] = true;
+  return settings;
+}, {});
+
+function normalizeDietPlanSettings(settings = {}) {
+  const source = settings && typeof settings === 'object' ? settings : {};
+  return DIET_PLAN_MEALS.reduce((result, key) => {
+    result[key] = source[key] !== false;
+    return result;
+  }, {});
+}
+
+function normalizeDietPlanItem(item = {}) {
+  const source = item && typeof item === 'object' ? item : {};
+  const price = Number(source.price || 0);
+  const stars = Number(source.stars || 5);
+  const stock = Number(source.stock === undefined || source.stock === null || source.stock === '' ? 999 : source.stock);
+  return {
+    id: String(source.id || makeId('diet_item')).slice(0, 128),
+    dishId: String(source.dishId || source.id || '').slice(0, 128),
+    name: String(source.name || '未命名菜谱').slice(0, 100),
+    desc: String(source.desc || '').slice(0, 300),
+    image: String(source.image || '').slice(0, 2000),
+    category: String(source.category || '未分类').slice(0, 128),
+    price: Number.isFinite(price) ? price : 0,
+    stars: Number.isFinite(stars) ? Math.max(1, Math.min(5, stars)) : 5,
+    sales: Math.max(0, Number(source.sales || 0) || 0),
+    stock: Number.isFinite(stock) ? stock : 999,
+    source: String(source.source || 'kitchen').slice(0, 32),
+    createdAt: Number(source.createdAt || Date.now()) || Date.now()
+  };
+}
+
+function normalizeDietPlans(plans = {}) {
+  const source = plans && typeof plans === 'object' ? plans : {};
+  return Object.keys(source).reduce((result, dateKey) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) return result;
+    const dayPlan = source[dateKey] && typeof source[dateKey] === 'object' ? source[dateKey] : {};
+    result[dateKey] = DIET_PLAN_MEALS.reduce((mealResult, mealKey) => {
+      mealResult[mealKey] = (Array.isArray(dayPlan[mealKey]) ? dayPlan[mealKey] : [])
+        .slice(0, 60)
+        .map(normalizeDietPlanItem);
+      return mealResult;
+    }, {});
+    return result;
+  }, {});
+}
+
+function toClientDietPlan(user) {
+  const row = user && user.toJSON ? user.toJSON() : (user || {});
+  return {
+    userId: String(row.id || ''),
+    plans: normalizeDietPlans(parseJson(row.dietPlans, {})),
+    settings: normalizeDietPlanSettings(parseJson(row.dietPlanSettings, DEFAULT_DIET_PLAN_SETTINGS)),
+    updatedAt: Number(row.dietPlanUpdatedAt || 0) || 0
+  };
+}
+
+async function requireDietPlanOwner(req, body = {}) {
+  const currentUser = await requireRequestUser(req, body);
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const targetUser = await findUserByIdOrLoginKey(req.params.id);
+  if (!targetUser) {
+    const err = new Error('User not found');
+    err.statusCode = 404;
+    err.clientMessage = '用户不存在';
+    throw err;
+  }
+
+  const targetRow = targetUser.toJSON ? targetUser.toJSON() : targetUser;
+  if (String(currentRow.id || '') !== String(targetRow.id || '')) {
+    const err = new Error('Forbidden');
+    err.statusCode = 403;
+    err.clientMessage = '只能修改自己的饮食计划';
+    throw err;
+  }
+  return targetUser;
+}
+
 function getClientRegionHeaderText(req) {
   const raw = req.headers['x-wx-client-province']
     || req.headers['x-client-province']
@@ -2549,6 +2636,31 @@ app.post('/api/users/:id/profile', asyncHandler(async (req, res) => {
   res.send({
     ok: true,
     user: await toClientUserWithDecoratedHistory(user)
+  });
+}));
+
+app.get('/api/users/:id/diet-plan', asyncHandler(async (req, res) => {
+  const user = await requireDietPlanOwner(req, req.query || {});
+  res.send({
+    ok: true,
+    ...toClientDietPlan(user)
+  });
+}));
+
+app.post('/api/users/:id/diet-plan', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const user = await requireDietPlanOwner(req, body);
+  const plans = normalizeDietPlans(body.plans || {});
+  const settings = normalizeDietPlanSettings(body.settings || {});
+  const updatedAt = Number(body.updatedAt || Date.now()) || Date.now();
+  await user.update({
+    dietPlans: stringifyJson(plans, {}),
+    dietPlanSettings: stringifyJson(settings, DEFAULT_DIET_PLAN_SETTINGS),
+    dietPlanUpdatedAt: updatedAt
+  });
+  res.send({
+    ok: true,
+    ...toClientDietPlan(user)
   });
 }));
 

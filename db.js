@@ -60,6 +60,18 @@ const User = sequelize.define('JrshUser', {
   signState: {
     type: DataTypes.TEXT('long'),
     allowNull: true
+  },
+  dietPlans: {
+    type: DataTypes.TEXT('long'),
+    allowNull: true
+  },
+  dietPlanSettings: {
+    type: DataTypes.TEXT('long'),
+    allowNull: true
+  },
+  dietPlanUpdatedAt: {
+    type: DataTypes.BIGINT,
+    allowNull: true
   }
 });
 
@@ -423,6 +435,9 @@ async function ensureRequiredColumns() {
   await addColumnIfMissing('JrshUser', 'cabbageBalance', 'DECIMAL(12,2) NOT NULL DEFAULT 2200.00');
   await addColumnIfMissing('JrshUser', 'cabbageHistory', 'LONGTEXT NULL');
   await addColumnIfMissing('JrshUser', 'signState', 'LONGTEXT NULL');
+  await addColumnIfMissing('JrshUser', 'dietPlans', 'LONGTEXT NULL');
+  await addColumnIfMissing('JrshUser', 'dietPlanSettings', 'LONGTEXT NULL');
+  await addColumnIfMissing('JrshUser', 'dietPlanUpdatedAt', 'BIGINT NULL');
 
   await addColumnIfMissing('JrshKitchen', 'legacyId', 'VARCHAR(128) NULL');
   await addColumnIfMissing('JrshKitchen', 'kitchenCode', 'VARCHAR(6) NULL');
