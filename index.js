@@ -1598,6 +1598,8 @@ const GEOIP_CHINA_REGION_MAP = {
   82: '澳门'
 };
 
+const CHINA_REGION_NAMES = Array.from(new Set(Object.values(GEOIP_CHINA_REGION_MAP)));
+
 const CHINA_REGION_EN_MAP = {
   BEIJING: '北京',
   TIANJIN: '天津',
@@ -1720,6 +1722,28 @@ function normalizeEnglishChinaRegion(value) {
   return CHINA_REGION_EN_MAP[key] || '';
 }
 
+function normalizeRegionDisplayText(value) {
+  const text = String(value || '').trim();
+  if (!text || text === '未知') return '';
+  if (normalizeIpv4Text(text) || normalizeIpv6Text(text)) return '';
+
+  const compactText = text.replace(/\s+/g, '');
+  const chinaRegion = CHINA_REGION_NAMES.find(region => compactText.includes(region));
+  if (compactText.includes('中国') || chinaRegion) return chinaRegion || '中国';
+
+  const firstPart = text
+    .replace(/[|/_，,;；-]+/g, ' ')
+    .split(/\s+/)
+    .map(part => part.trim())
+    .filter(Boolean)[0] || '';
+  const normalizedFirstPart = normalizeIpRegionPart(firstPart);
+  if (!normalizedFirstPart) return '';
+  if (/^[\u4e00-\u9fa5]{2,8}$/.test(normalizedFirstPart)) {
+    return normalizeProvinceName(normalizedFirstPart) || normalizedFirstPart;
+  }
+  return '';
+}
+
 function readJsonFromUrl(url, timeoutMs = 1800, redirectCount = 0) {
   return new Promise(resolve => {
     const client = String(url || '').startsWith('https:') ? https : http;
@@ -1762,6 +1786,8 @@ function readJsonFromUrl(url, timeoutMs = 1800, redirectCount = 0) {
 }
 
 function parseZxincRegionText(value) {
+  const normalized = normalizeRegionDisplayText(value);
+  if (normalized) return normalized;
   const parts = String(value || '')
     .split(/[\t\s]+/)
     .map(part => part.trim())
@@ -1958,6 +1984,8 @@ function lookupOfflineIpRegion(ip) {
 async function resolveIpRegionText(value) {
   const text = String(value || '').trim();
   if (!text || text === '未知') return '未知';
+  const normalizedRegionText = normalizeRegionDisplayText(text);
+  if (normalizedRegionText) return normalizedRegionText;
   if (/^[\u4e00-\u9fa5]{2,8}$/.test(text)) return normalizeProvinceName(text) || '未知';
   const onlineRegion = await lookupOnlineIpRegion(text);
   if (onlineRegion) return onlineRegion;
