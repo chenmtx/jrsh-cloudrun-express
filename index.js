@@ -3059,6 +3059,21 @@ app.post('/api/friend-requests/:id/reject', asyncHandler(async (req, res) => {
   res.send({ ok: true, request: requestRow.toJSON ? requestRow.toJSON() : requestRow });
 }));
 
+app.post('/api/friends/:friendUserId/delete', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.body || {});
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const currentUserId = String(currentRow.id || '');
+  const friendUserId = String(req.params.friendUserId || '').trim();
+  const relation = await findFriendRelation(currentUserId, friendUserId, ['accepted']);
+  if (!relation) {
+    res.status(404).send({ ok: false, error: 'Friend relation not found', message: '好友关系不存在' });
+    return;
+  }
+
+  await relation.update({ status: 'deleted' });
+  res.send({ ok: true, relation: relation.toJSON ? relation.toJSON() : relation });
+}));
+
 app.get('/api/friends/:friendUserId/kitchens', asyncHandler(async (req, res) => {
   const currentUser = await requireRequestUser(req, req.query || {});
   const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
