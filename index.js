@@ -112,6 +112,102 @@ function normalizeKitchenInfo(kitchenId, rawInfo = {}, row = {}) {
   return normalized;
 }
 
+function normalizeKitchenRecycleBin(bin = {}) {
+  const source = bin && typeof bin === 'object' ? bin : {};
+  const recipes = Array.isArray(source.recipes) ? source.recipes.filter(item => item && typeof item === 'object') : [];
+  const orders = Array.isArray(source.orders) ? source.orders.filter(item => item && typeof item === 'object') : [];
+  return {
+    recipes,
+    orders
+  };
+}
+
+function getKitchenRecycleBin(info = {}) {
+  return normalizeKitchenRecycleBin(info.recycleBin || {});
+}
+
+function buildKitchenRecycleBinInfo(info = {}, recycleBin = {}) {
+  return {
+    ...(info || {}),
+    recycleBin: normalizeKitchenRecycleBin(recycleBin)
+  };
+}
+
+function createRecipeRecycleRecord(dish = {}, deletedAt = new Date()) {
+  const row = dish && typeof dish === 'object' ? dish : {};
+  return {
+    id: String(row.recycleRecordId || row.id || makeId('recycle_recipe')),
+    dish: {
+      ...row,
+      id: row.id
+    },
+    deletedAt: formatDateTime(deletedAt)
+  };
+}
+
+function createOrderRecycleRecord(order = {}, deletedAt = new Date()) {
+  const row = order && typeof order === 'object' ? order : {};
+  return {
+    id: String(row.recycleRecordId || row.id || makeId('recycle_order')),
+    order: {
+      ...row,
+      id: row.id
+    },
+    deletedAt: formatDateTime(deletedAt)
+  };
+}
+
+function appendRecipeRecycleRecords(recycleBin = {}, dishes = [], deletedAt = new Date()) {
+  const current = normalizeKitchenRecycleBin(recycleBin);
+  const nextRecipes = current.recipes.slice();
+  (Array.isArray(dishes) ? dishes : []).forEach(dish => {
+    nextRecipes.unshift(createRecipeRecycleRecord(dish, deletedAt));
+  });
+  return {
+    ...current,
+    recipes: nextRecipes
+  };
+}
+
+function appendOrderRecycleRecord(recycleBin = {}, order = {}, deletedAt = new Date()) {
+  const current = normalizeKitchenRecycleBin(recycleBin);
+  return {
+    ...current,
+    orders: [createOrderRecycleRecord(order, deletedAt)].concat(current.orders)
+  };
+}
+
+function buildClientRecycleRecipeRecord(record = {}) {
+  const dish = record.dish && typeof record.dish === 'object' ? record.dish : {};
+  return {
+    id: String(record.id || dish.id || ''),
+    deletedAt: record.deletedAt || '',
+    dish: toClientDish(dish)
+  };
+}
+
+function buildClientRecycleOrderRecord(record = {}) {
+  const order = record.order && typeof record.order === 'object' ? record.order : {};
+  return {
+    id: String(record.id || order.id || ''),
+    deletedAt: record.deletedAt || '',
+    order: {
+      ...toClientOrder(order),
+      deletedAt: record.deletedAt || ''
+    }
+  };
+}
+
+async function getOwnedKitchenOrThrow(kitchenId, operatorUserId) {
+  const kitchen = await findKitchenByIdOrLegacy(kitchenId);
+  if (!kitchen) return { status: 404, message: '厨房不存在' };
+  const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  if (String(kitchenRow.ownerUserId || '') !== String(operatorUserId || '')) {
+    return { status: 403, message: '只能操作自己的厨房' };
+  }
+  return { kitchen };
+}
+
 function formatCabbageNumber(value, fallback = 2200.00) {
   const parsed = parseFloat(value);
   if (Number.isNaN(parsed)) {
@@ -627,18 +723,11 @@ async function cleanupLegacySoftDeletedOrders() {
 async function replaceKitchenOrders(kitchenId, ownerUserId, orders, options = {}) {
   const normalizedOrders = normalizeOrderList(orders);
   await sequelize.transaction(async transaction => {
-    // 删除本次推送的订单ID（用于更新）
-    const orderIds = normalizedOrders.map(o => o.id);
-    if (orderIds.length > 0) {
-      await Order.destroy({
-        where: {
-          id: { [Op.in]: orderIds }
-        },
-        transaction
-      });
-    }
+    await Order.destroy({
+      where: { kitchenId },
+      transaction
+    });
 
-    // 插入订单
     if (normalizedOrders.length > 0) {
       await Order.bulkCreate(
         normalizedOrders.map(order => toOrderRow(kitchenId, ownerUserId, order)),
@@ -646,7 +735,6 @@ async function replaceKitchenOrders(kitchenId, ownerUserId, orders, options = {}
       );
     }
 
-    // 更新Kitchen表的镜像字段（如果需要）
     if (options.updateKitchenMirror) {
       await Kitchen.update(
         { orders: stringifyJson(normalizedOrders, []) },
@@ -2560,6 +2648,10 @@ async function toClientState(kitchen) {
     categories: parseJson(row.categories, []),
     dishes,
     orders,
+    recycleBin: {
+      recipes: getKitchenRecycleBin(kitchenInfo).recipes.map(buildClientRecycleRecipeRecord),
+      orders: getKitchenRecycleBin(kitchenInfo).orders.map(buildClientRecycleOrderRecord)
+    },
     lastQueueCode: row.lastQueueCode || null,
     updatedAt: row.updatedAt
   };
@@ -2719,8 +2811,11 @@ app.delete('/api/orders/:id', asyncHandler(async (req, res) => {
   if (kitchen) {
     const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
     const legacyOrders = normalizeOrderList(kitchenRow.orders).filter(item => String(item.id || '') !== orderId);
+    const kitchenInfo = normalizeKitchenInfo(kitchenRow.id, parseJson(kitchenRow.kitchenInfo, {}), kitchenRow);
+    const recycleBin = appendOrderRecycleRecord(getKitchenRecycleBin(kitchenInfo), toClientOrder(current), new Date());
     await kitchen.update({
-      orders: stringifyJson(legacyOrders, [])
+      orders: stringifyJson(legacyOrders, []),
+      kitchenInfo: stringifyJson(buildKitchenRecycleBinInfo(kitchenInfo, recycleBin), {})
     });
   }
 
@@ -2728,6 +2823,155 @@ app.delete('/api/orders/:id', asyncHandler(async (req, res) => {
   res.send({
     ok: true,
     deletedOrderId: orderId
+  });
+}));
+
+app.get('/api/kitchens/:id/recycle-bin', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.query || {});
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const ownedResult = await getOwnedKitchenOrThrow(req.params.id, currentRow.id);
+  if (!ownedResult.kitchen) {
+    res.status(ownedResult.status).send({ ok: false, error: 'Kitchen access denied', message: ownedResult.message });
+    return;
+  }
+
+  const kitchen = ownedResult.kitchen;
+  const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const kitchenInfo = normalizeKitchenInfo(kitchenRow.id, parseJson(kitchenRow.kitchenInfo, {}), kitchenRow);
+  const recycleBin = getKitchenRecycleBin(kitchenInfo);
+
+  res.send({
+    ok: true,
+    kitchenId: kitchenRow.id,
+    recipes: recycleBin.recipes.map(buildClientRecycleRecipeRecord),
+    orders: recycleBin.orders.map(buildClientRecycleOrderRecord)
+  });
+}));
+
+app.post('/api/kitchens/:id/recycle-bin/recipes', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const currentUser = await requireRequestUser(req, body);
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const ownedResult = await getOwnedKitchenOrThrow(req.params.id, currentRow.id);
+  if (!ownedResult.kitchen) {
+    res.status(ownedResult.status).send({ ok: false, error: 'Kitchen access denied', message: ownedResult.message });
+    return;
+  }
+
+  const kitchen = ownedResult.kitchen;
+  const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const dishIds = Array.isArray(body.dishIds)
+    ? body.dishIds.map(id => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (!dishIds.length) {
+    res.status(400).send({ ok: false, error: 'Invalid request', message: '请选择要删除的菜谱' });
+    return;
+  }
+
+  const currentDishes = await loadKitchenDishes(kitchen);
+  const removedDishes = currentDishes.filter(dish => dishIds.includes(String(dish.id || '')));
+  if (!removedDishes.length) {
+    res.status(404).send({ ok: false, error: 'Dish not found', message: '菜谱不存在' });
+    return;
+  }
+
+  const nextDishes = currentDishes.filter(dish => !dishIds.includes(String(dish.id || '')));
+  const kitchenInfo = normalizeKitchenInfo(kitchenRow.id, parseJson(kitchenRow.kitchenInfo, {}), kitchenRow);
+  const recycleBin = appendRecipeRecycleRecords(getKitchenRecycleBin(kitchenInfo), removedDishes, new Date());
+
+  await kitchen.update({
+    kitchenInfo: stringifyJson(buildKitchenRecycleBinInfo(kitchenInfo, recycleBin), {})
+  });
+  await replaceKitchenDishes(kitchenRow.id, kitchenRow.ownerUserId, nextDishes, { updateKitchenMirror: true });
+
+  res.send({
+    ok: true,
+    kitchenId: kitchenRow.id,
+    removedDishIds: removedDishes.map(dish => String(dish.id || ''))
+  });
+}));
+
+app.post('/api/kitchens/:id/recycle-bin/recipes/:recordId/restore', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const currentUser = await requireRequestUser(req, body);
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const ownedResult = await getOwnedKitchenOrThrow(req.params.id, currentRow.id);
+  if (!ownedResult.kitchen) {
+    res.status(ownedResult.status).send({ ok: false, error: 'Kitchen access denied', message: ownedResult.message });
+    return;
+  }
+
+  const kitchen = ownedResult.kitchen;
+  const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const kitchenInfo = normalizeKitchenInfo(kitchenRow.id, parseJson(kitchenRow.kitchenInfo, {}), kitchenRow);
+  const recycleBin = getKitchenRecycleBin(kitchenInfo);
+  const recordId = String(req.params.recordId || '').trim();
+  const recipeIndex = recycleBin.recipes.findIndex(item => String(item.id || '') === recordId);
+  if (recipeIndex < 0) {
+    res.status(404).send({ ok: false, error: 'Recycle record not found', message: '回收站菜谱不存在' });
+    return;
+  }
+
+  const record = recycleBin.recipes[recipeIndex];
+  const restoredDish = toClientDish(record.dish || {});
+  const currentDishes = await loadKitchenDishes(kitchen);
+  const nextDishes = currentDishes.concat(restoredDish);
+  const nextRecycleBin = {
+    ...recycleBin,
+    recipes: recycleBin.recipes.filter((item, index) => index !== recipeIndex)
+  };
+
+  await kitchen.update({
+    kitchenInfo: stringifyJson(buildKitchenRecycleBinInfo(kitchenInfo, nextRecycleBin), {})
+  });
+  await replaceKitchenDishes(kitchenRow.id, kitchenRow.ownerUserId, nextDishes, { updateKitchenMirror: true });
+
+  res.send({
+    ok: true,
+    kitchenId: kitchenRow.id,
+    dish: restoredDish
+  });
+}));
+
+app.post('/api/kitchens/:id/recycle-bin/orders/:recordId/restore', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const currentUser = await requireRequestUser(req, body);
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  const ownedResult = await getOwnedKitchenOrThrow(req.params.id, currentRow.id);
+  if (!ownedResult.kitchen) {
+    res.status(ownedResult.status).send({ ok: false, error: 'Kitchen access denied', message: ownedResult.message });
+    return;
+  }
+
+  const kitchen = ownedResult.kitchen;
+  const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const kitchenInfo = normalizeKitchenInfo(kitchenRow.id, parseJson(kitchenRow.kitchenInfo, {}), kitchenRow);
+  const recycleBin = getKitchenRecycleBin(kitchenInfo);
+  const recordId = String(req.params.recordId || '').trim();
+  const orderIndex = recycleBin.orders.findIndex(item => String(item.id || '') === recordId);
+  if (orderIndex < 0) {
+    res.status(404).send({ ok: false, error: 'Recycle record not found', message: '回收站订单不存在' });
+    return;
+  }
+
+  const record = recycleBin.orders[orderIndex];
+  const restoredOrder = toClientOrder(record.order || {});
+  const currentOrders = await loadKitchenOrders(kitchen);
+  const nextOrders = currentOrders.concat(restoredOrder);
+  const nextRecycleBin = {
+    ...recycleBin,
+    orders: recycleBin.orders.filter((item, index) => index !== orderIndex)
+  };
+
+  await kitchen.update({
+    kitchenInfo: stringifyJson(buildKitchenRecycleBinInfo(kitchenInfo, nextRecycleBin), {})
+  });
+  await replaceKitchenOrders(kitchenRow.id, kitchenRow.ownerUserId, nextOrders, { updateKitchenMirror: true });
+
+  res.send({
+    ok: true,
+    kitchenId: kitchenRow.id,
+    order: restoredOrder
   });
 }));
 
