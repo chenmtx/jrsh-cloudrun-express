@@ -403,6 +403,33 @@ const FriendRelation = sequelize.define('JrshFriendRelation', {
   }
 });
 
+const KitchenVisitRecord = sequelize.define('JrshKitchenVisitRecord', {
+  id: {
+    type: DataTypes.STRING(191),
+    primaryKey: true
+  },
+  kitchenId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  visitorUserId: {
+    type: DataTypes.STRING(128),
+    allowNull: false
+  },
+  visitorNickname: {
+    type: DataTypes.STRING(100),
+    allowNull: true
+  },
+  visitorAvatar: {
+    type: DataTypes.TEXT('long'),
+    allowNull: true
+  },
+  visitedAt: {
+    type: DataTypes.DATE,
+    allowNull: false
+  }
+});
+
 function quoteIdentifier(value) {
   return `\`${String(value || '').replace(/`/g, '``')}\``;
 }
@@ -472,7 +499,8 @@ async function ensureUtf8mb4() {
     'JrshLifeShareComment',
     'JrshLifeShareLike',
     'JrshLifeShareNotification',
-    'JrshFriendRelation'
+    'JrshFriendRelation',
+    'JrshKitchenVisitRecord'
   ];
   try {
     await sequelize.query(`ALTER DATABASE ${quoteIdentifier(MYSQL_DATABASE)} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`);
@@ -500,6 +528,7 @@ async function init() {
   await LifeShareLike.sync();
   await LifeShareNotification.sync();
   await FriendRelation.sync();
+  await KitchenVisitRecord.sync();
   await ensureRequiredColumns();
   await ensureUtf8mb4();
 }
@@ -515,5 +544,6 @@ module.exports = {
   LifeShareComment,
   LifeShareLike,
   LifeShareNotification,
-  FriendRelation
+  FriendRelation,
+  KitchenVisitRecord
 };

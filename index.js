@@ -17,7 +17,8 @@ const {
   LifeShareComment,
   LifeShareLike,
   LifeShareNotification,
-  FriendRelation
+  FriendRelation,
+  KitchenVisitRecord
 } = require('./db');
 
 const app = express();
@@ -197,6 +198,19 @@ function toClientUser(user) {
     signState: ensureMonthlySignState(row),
     cabbageBalance,
     cabbageHistory: parseUserCabbageHistory(row, cabbageBalance)
+  };
+}
+
+function toClientKitchenVisitRecord(record) {
+  const row = record && record.toJSON ? record.toJSON() : (record || {});
+  return {
+    id: row.id || '',
+    kitchenId: row.kitchenId || '',
+    visitorUserId: row.visitorUserId || '',
+    visitorNickname: row.visitorNickname || '访客',
+    visitorAvatar: row.visitorAvatar || '',
+    visitedAt: row.visitedAt ? new Date(row.visitedAt).getTime() : 0,
+    visitedAtText: formatDateTime(row.visitedAt || new Date())
   };
 }
 
@@ -1452,6 +1466,89 @@ async function requireRequestUser(req, body = {}) {
   return user;
 }
 
+function getVisitRangeStart(range) {
+  const value = String(range || 'week').trim();
+  const now = Date.now();
+  if (value === 'today') {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return today;
+  }
+  if (value === 'yesterday') {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 0, 0, 0);
+    return yesterday;
+  }
+  if (value === 'month') return new Date(now - 30 * 24 * 60 * 60 * 1000);
+  if (value === 'all') return null;
+  return new Date(now - 7 * 24 * 60 * 60 * 1000);
+}
+
+function getVisitRangeEnd(range) {
+  if (String(range || '').trim() !== 'yesterday') return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return today;
+}
+
+async function recordKitchenVisit(kitchen, visitorUser) {
+  if (!kitchen || !visitorUser) return null;
+  const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const userRow = visitorUser.toJSON ? visitorUser.toJSON() : visitorUser;
+  const kitchenId = String(kitchenRow.id || '').trim();
+  const visitorUserId = String(userRow.id || '').trim();
+  if (!kitchenId || !visitorUserId) return null;
+  if (String(kitchenRow.ownerUserId || '') === visitorUserId) return null;
+
+  const now = new Date();
+  const recentStart = new Date(now.getTime() - 5 * 60 * 1000);
+  const recentRecord = await KitchenVisitRecord.findOne({
+    where: {
+      kitchenId,
+      visitorUserId,
+      visitedAt: { [Op.gte]: recentStart }
+    },
+    order: [['visitedAt', 'DESC'], ['createdAt', 'DESC']]
+  });
+  if (recentRecord) return { record: recentRecord, created: false };
+
+  const fiveMinuteBucket = Math.floor(now.getTime() / (5 * 60 * 1000));
+  const id = `${kitchenId}:${visitorUserId}:${fiveMinuteBucket}`;
+  const payload = {
+    id,
+    kitchenId,
+    visitorUserId,
+    visitorNickname: String(userRow.nickname || '访客').slice(0, 100),
+    visitorAvatar: userRow.avatar || '',
+    visitedAt: now
+  };
+
+  try {
+    const [record, created] = await KitchenVisitRecord.findOrCreate({
+      where: { id },
+      defaults: payload
+    });
+    return { record, created };
+  } catch (err) {
+    if (err && err.name === 'SequelizeUniqueConstraintError') return null;
+    throw err;
+  }
+}
+
+function dedupeKitchenVisitRecords(records) {
+  const latestVisitAtByKey = {};
+  return (Array.isArray(records) ? records : []).filter(record => {
+    const row = record && record.toJSON ? record.toJSON() : (record || {});
+    const visitedAt = new Date(row.visitedAt || row.createdAt || Date.now()).getTime();
+    const safeVisitedAt = Number.isFinite(visitedAt) ? visitedAt : Date.now();
+    const key = `${row.kitchenId || ''}:${row.visitorUserId || ''}`;
+    if (latestVisitAtByKey[key] && latestVisitAtByKey[key] - safeVisitedAt < 5 * 60 * 1000) return false;
+    latestVisitAtByKey[key] = safeVisitedAt;
+    return true;
+  });
+}
+
 function getUserPublicSummary(user) {
   const row = user && user.toJSON ? user.toJSON() : (user || {});
   return {
@@ -2529,6 +2626,9 @@ app.post('/api/bootstrap', asyncHandler(async (req, res) => {
   const effectiveOwnedKitchens = ownedKitchens.length ? ownedKitchens : [ownerKitchen];
   const ownKitchenOrders = await loadOwnedKitchenOrders(effectiveOwnedKitchens);
   const ownedKitchenSummaries = await Promise.all(effectiveOwnedKitchens.map(toClientKitchenSummary));
+  if (requestedKitchenId && String(kitchen.ownerUserId || '') !== String(user.id || '')) {
+    await recordKitchenVisit(kitchen, user);
+  }
 
   res.send({
     user: toClientUser(user),
@@ -3970,6 +4070,67 @@ app.get('/api/debug/session-switch-data', asyncHandler(async (req, res) => {
       };
     }),
     kitchens: kitchenRows
+  });
+}));
+
+app.post('/api/kitchens/:id/visit-records', asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const visitor = await requireRequestUser(req, body);
+  const kitchen = await findKitchenByIdOrLegacy(req.params.id);
+  if (!kitchen) {
+    res.status(404).send({ error: 'Kitchen not found', message: '厨房不存在' });
+    return;
+  }
+
+  const result = await recordKitchenVisit(kitchen, visitor);
+  res.send({
+    ok: true,
+    recorded: !!(result && result.created)
+  });
+}));
+
+app.get('/api/kitchens/:id/visit-records', asyncHandler(async (req, res) => {
+  const currentUser = await requireRequestUser(req, req.query || {});
+  const kitchen = await findKitchenByIdOrLegacy(req.params.id);
+  if (!kitchen) {
+    res.status(404).send({ error: 'Kitchen not found', message: '厨房不存在' });
+    return;
+  }
+
+  const kitchenRow = kitchen.toJSON ? kitchen.toJSON() : kitchen;
+  const currentRow = currentUser.toJSON ? currentUser.toJSON() : currentUser;
+  if (String(kitchenRow.ownerUserId || '') !== String(currentRow.id || '')) {
+    res.status(403).send({ error: 'Forbidden', message: '只能查看自己厨房的访问记录' });
+    return;
+  }
+
+  const where = { kitchenId: kitchenRow.id };
+  const rangeStart = getVisitRangeStart(req.query.range);
+  const rangeEnd = getVisitRangeEnd(req.query.range);
+  if (rangeStart || rangeEnd) {
+    where.visitedAt = {};
+    if (rangeStart) where.visitedAt[Op.gte] = rangeStart;
+    if (rangeEnd) where.visitedAt[Op.lt] = rangeEnd;
+  }
+
+  const keyword = String(req.query.keyword || '').trim();
+  if (keyword) {
+    where[Op.or] = [
+      { visitorNickname: { [Op.like]: `%${keyword}%` } },
+      { visitorUserId: { [Op.like]: `%${keyword}%` } }
+    ];
+  }
+
+  const records = await KitchenVisitRecord.findAll({
+    where,
+    order: [['visitedAt', 'DESC'], ['createdAt', 'DESC']],
+    limit: 300
+  });
+
+  res.send({
+    ok: true,
+    kitchenId: kitchenRow.id,
+    records: dedupeKitchenVisitRecords(records).map(toClientKitchenVisitRecord)
   });
 }));
 
