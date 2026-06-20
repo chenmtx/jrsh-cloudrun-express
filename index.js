@@ -2653,6 +2653,15 @@ app.post('/api/users/:id/diet-plan', asyncHandler(async (req, res) => {
   const plans = normalizeDietPlans(body.plans || {});
   const settings = normalizeDietPlanSettings(body.settings || {});
   const updatedAt = Number(body.updatedAt || Date.now()) || Date.now();
+  const current = toClientDietPlan(user);
+  if (current.updatedAt > updatedAt) {
+    res.send({
+      ok: true,
+      ...current
+    });
+    return;
+  }
+
   await user.update({
     dietPlans: stringifyJson(plans, {}),
     dietPlanSettings: stringifyJson(settings, DEFAULT_DIET_PLAN_SETTINGS),
